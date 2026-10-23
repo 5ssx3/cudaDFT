@@ -26,6 +26,7 @@ const char* lbfgs_status_message(int status) noexcept
         case kLBFGSLineSearchFailed: return "Line search could not find an acceptable step";
         case kLBFGSEvaluationError: return "Objective/gradient callback failed";
         case kLBFGSNotInitialized: return "Optimizer is not initialized or is unusable";
+        case kLBFGSLineSearchLimitReached: return "Line search limit reached; accepted point retained";
         default: return status_message(status);
     }
 }
@@ -454,7 +455,7 @@ int WolfeLineSearch(Context& context, LBFGSState& lbfgs, calculate_F evaluate, v
             : 2.0 * eta;
         if (!std::isfinite(eta) || eta <= 0) return kLBFGSLineSearchFailed;
     }
-    return kLBFGSLineSearchFailed;
+    return kLBFGSLineSearchLimitReached;
 }
 int LBFGSOptimizer(Context& context, LBFGSState& lbfgs, calculate_F evaluate, void* user_data)
 {   
@@ -473,9 +474,13 @@ int LBFGSOptimizer(Context& context, LBFGSState& lbfgs, calculate_F evaluate, vo
         return report(kInvalidState);
     const int context_status = validate_context(context);
     if (context_status != kSuccess) return report(context_status);
-    auto finish = [&](int result) {
+    auto finish = [&](int result) -> int {
         // 确认异步操作已结束；硬件/数值故障后禁用此状态，防止继续使用部分更新。
         if (!CHECK_CUDA(cudaStreamSynchronize(context.stream))) result = kCudaSyncError;
+        if (result == kLBFGSLineSearchLimitReached) {
+            report(result);
+            return kSuccess;
+        }
         if (result != kSuccess && result != kLBFGSConverged &&
             result != kLBFGSEvaluationError && result != kLBFGSLineSearchFailed)
             lbfgs.status = result;
@@ -503,14 +508,20 @@ void write_log(const LBFGSState& lbfgs, int result, const char* stage) noexcept 
         std::fprintf(stderr, "| %-14s %-61.61s |\n", label, value);
     };
     char value[160];
-    std::fprintf(stderr, "\n%s| %-76s |\n", border,
-        result == kLBFGSConverged ? "L-BFGS | CONVERGED" : "L-BFGS | FAILED");
+    const char* title = result == kLBFGSConverged ? "L-BFGS | CONVERGED" :
+        result == kLBFGSLineSearchLimitReached ? "L-BFGS | WARNING" : "L-BFGS | FAILED";
+    std::fprintf(stderr, "\n%s| %-76s |\n", border, title);
     row("Stage", stage);
     std::snprintf(value, sizeof(value), "%d (%s)", result, lbfgs_status_message(result));
     row("Status", value);
     std::snprintf(value, sizeof(value), "%zu accepted / %zu evaluations / %d last trials",
         lbfgs.iterations, lbfgs.evaluations, lbfgs.line_search_trials);
     row("Work", value);
+    if (result == kLBFGSLineSearchLimitReached) {
+        std::snprintf(value, sizeof(value), "%d / %d",
+            lbfgs.line_search_trials, lbfgs.max_linesearch_step);
+        row("Trials / limit", value);
+    }
     if (lbfgs.evaluations == 0) {
         row("f / ||g||_2", "n/a");
     } else {

@@ -3,7 +3,7 @@
 struct Context;
 // 通用错误沿用 cuda_math.hpp 中的 Status；L-BFGS 专用状态从 200 开始。
 enum LBFGSStatus : int {
-    kLBFGSSuccess = 0,           // 完成一次更新，尚未达到梯度阈值
+    kLBFGSSuccess = 0,           // 完成一次更新或线搜索次数耗尽后正常返回
     kLBFGSConverged = 200,
     kLBFGSCublasError,
     kLBFGSCusolverError,
@@ -14,6 +14,7 @@ enum LBFGSStatus : int {
     kLBFGSLineSearchFailed,
     kLBFGSEvaluationError,
     kLBFGSNotInitialized,
+    kLBFGSLineSearchLimitReached, // 警告；单步接口输出日志后返回 0
 };
 
 const char* lbfgs_status_message(int status) noexcept;
@@ -71,9 +72,10 @@ struct LBFGSState {
 int destory_LBFGSOptimizer(LBFGSState& lbfgs);
 int LBFGSOptimizer_init(Context& context,LBFGSState& lbfgs,int n, 
     int history_capacity, calculate_F evaluate, void* user_data, double* d_x_guess);
-// 每次至多接受一步；返回 0 表示完成一步，kLBFGSConverged 表示达到梯度阈值。
-// 其他返回值为错误；回调错误和线搜索次数耗尽时，接受点及历史保持不变，可重试。
+// 每次至多接受一步；返回 0 表示正常结束，kLBFGSConverged 表示达到梯度阈值。
+// 线搜索次数耗尽时保留接受点及历史，步长为 0，输出警告并返回 0，可再次调用。
+// 其他返回值为错误；回调错误时接受点及历史保持不变，可重试。
 // context.cublas 必须使用 context.stream，入口标量指针模式必须为 HOST。
-// 错误及收敛时自动输出日志，普通成功步骤不输出。
+// 错误、收敛及线搜索次数耗尽时自动输出日志，普通成功步骤不输出。
 int LBFGSOptimizer(Context& context, LBFGSState& lbfgs, calculate_F evaluate, void* user_data);
 void write_log(const LBFGSState& lbfgs, int result, const char* stage) noexcept;
