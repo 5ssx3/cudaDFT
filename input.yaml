@@ -1,0 +1,62 @@
+# 1. 系统体系
+system:
+  geometry_file: geometry.xyz
+  density_file: target_density.h5
+  spin: unpolarized
+  electron_model: all_electron
+
+# 2. 计算盒设置
+domain:
+  padding: [12.0, 12.0, 12.0]
+  orbital_boundary: dirichlet_zero
+  hartree_boundary: multipole
+  multipole_order: 4
+
+# 3. 网格设置
+mesh:
+  type: uniform
+  stencil_half_width: 1
+  spacing: 0.8
+  block_cells: [8, 8, 8]
+
+# 4. 反解设置
+inversion:
+  hartree_density: target
+  initial_potential: zero
+
+  eigensolver:
+    method: chebyshev_subspace
+    residual_tolerance: 1.0e-9
+    extra_states: 4
+    spectral_bounds: estimate
+    filter_degree: automatic
+
+  occupations:
+    method: fd
+    kbt: 1.0e-3
+
+  optimizer:
+    method: lbfgs
+    history: 10
+    max_iterations: 300
+    line_search: backtracking
+
+  objective:
+    density_metric: relative_l2
+    regularization:
+      type: gradient_l2
+      strength: 1.0e-6
+
+  convergence:
+    density_relative_l2: 1.0e-5
+    gradient_tolerance: 1.0e-7
+
+# 5. 输出设置
+output:
+  directory: ./results
+  write_vxc: true
+  write_density: true
+  write_density_difference: true
+  write_orbitals: false
+  write_checkpoint: true
+  write_resolved_input: true

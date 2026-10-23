@@ -1,0 +1,27 @@
+# Local backups and validation artifacts
+/backup/
+/*_original_*/
+/lbfgs_status_*/
+/temp/
+
+# Build products
+/build/
+/cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+*.o
+*.obj
+*.a
+*.so
+*.so.*
+*.out
+*.exe
+*.ptx
+*.cubin
+*.fatbin
+
+# Runtime logs and editor temporary files
+*.log
+*.swp
+*.swo
+*~
