@@ -8,6 +8,8 @@
 #include <new>
 #include <iostream>
 
+// 将项目定义的 Status 转换为说明文本；不直接接收 CUDA/cuFFT 等库的原生错误码。
+// 返回静态字符串，无需释放；未识别的状态码返回默认说明。
 const char* status_message(int status) noexcept {
     switch (status) {
         case kSuccess: return "Success";
@@ -23,10 +25,12 @@ const char* status_message(int status) noexcept {
         case kFftStreamError: return "cuFFT stream binding failed";
         case kFftExecuteError: return "cuFFT forward or inverse transform failed";
         case kFftDestroyError: return "cuFFT plan destruction failed";
+        case kCudaInitError: return "CUDA device query, selection or runtime initialization failed";
+        case kCublasError: return "cuBLAS handle creation, configuration or operation failed";
+        case kCusolverError: return "cuSOLVER handle creation, configuration or operation failed";
         default: return "Unknown mathematical-tool status";
     }
 }
-
 // upload and download
 int upload(double* h_data, void** d_data, int npoints){
     if (d_data == nullptr) return kInvalidArgument;
@@ -245,6 +249,11 @@ __global__ void RealArrayPlusRealArray_kernel(const size_t npoints, double* Real
     if(i>= npoints) return;
     RealArray1[i] = RealArray1[i]+RealArray2[i];
 }
+__global__ void RealArrayMulRealArray_kernel(const size_t npoints, double* RealArray1, double* RealArray2){
+    const size_t i = static_cast<size_t>(blockIdx.x)*blockDim.x+threadIdx.x;
+    if(i>= npoints) return;
+    RealArray1[i] = RealArray1[i]*RealArray2[i];
+}
 __global__ void RealReal_FGdv_kernel(const double* F, const double* G, const double dv,
                              const int nponts, double* result){
     int i = blockIdx.x*blockDim.x+threadIdx.x;
@@ -255,7 +264,7 @@ __global__ void ComplexComplex_FGdv_kernel(const cuDoubleComplex* F, const cuDou
                              const int nponts, cuDoubleComplex* result){
     int i = blockIdx.x*blockDim.x+threadIdx.x;
     if (i>= nponts) return;
-    result[i] = ComplexMulReal(cuCmul(F[i],G[i]), dv);
+    result[i] = ComplexMulReal(cuCmul(cuConj(F[i]),G[i]), dv);
 }
 __global__ void ComplexReal_FGdv_kernel(const cuDoubleComplex* F, const double* G, const double dv,
                              const int nponts, cuDoubleComplex* result){
@@ -263,6 +272,7 @@ __global__ void ComplexReal_FGdv_kernel(const cuDoubleComplex* F, const double* 
     if (i>= nponts) return;
     result[i] = ComplexMulReal(ComplexMulReal(F[i],G[i]), dv);
 }
+
 ///////////////////////////////////////////////////////////////////////////////////////////
 __global__ void laplacian_fft_kernel(const double* d_lapG2, const cuDoubleComplex* psi_fft,
                                      const int npoints, cuDoubleComplex* laplacian_psi_fft) {
@@ -468,7 +478,7 @@ int ComplexReal_IntegralFGdV(const Context& context, const cuDoubleComplex* d_F,
     const cudaError_t error = cudaFree(d_products);
     return status == kSuccess && error != cudaSuccess ? kCudaFreeError : status;
 }
-// This is integral(F * G) dV, not the conjugated inner product integral(conj(F) * G) dV.
+// This is integral(conj(F) * G) dV
 int ComplexComplex_IntegralFGdV(const Context& context, const cuDoubleComplex* d_F,
                                const cuDoubleComplex* d_G, double dv,
                                int npoints, cuDoubleComplex* d_result) noexcept {
@@ -486,6 +496,31 @@ int ComplexComplex_IntegralFGdV(const Context& context, const cuDoubleComplex* d
         ? sum_integral(context, d_products, npoints, d_result) : kCudaLaunchError;
     const cudaError_t error = cudaFree(d_products);
     return status == kSuccess && error != cudaSuccess ? kCudaFreeError : status;
+}
+// int RealReal_IntegralFGdV(const Context& context, const double* d_F,
+//                                const double* d_G, double dv,
+//                                int npoints, double* d_result) noexcept {
+//     if (d_F == nullptr || d_G == nullptr ||
+//         d_result == nullptr || npoints <= 0 || !std::isfinite(dv))
+//         return kInvalidArgument;
+//     double* d_products = nullptr;
+//     if (cudaMalloc(reinterpret_cast<void**>(&d_products),
+//                    sizeof(double) * static_cast<std::size_t>(npoints)) != cudaSuccess)
+//         return kAllocationError;
+//     int blocks = 0;
+//     grid_blocks(npoints, blocks);
+//     RealReal_FGdv_kernel<<<blocks, 256, 0, context.stream>>>(d_F, d_G, dv, npoints, d_products);
+//     const int status = cudaGetLastError() == cudaSuccess
+//         ? sum_integral(context, d_products, npoints, d_result) : kCudaLaunchError;
+//     const cudaError_t error = cudaFree(d_products);
+//     return status == kSuccess && error != cudaSuccess ? kCudaFreeError : status;
+// }
+int RealArrayMulRealArray(const Context& context, double* d_F,
+                               double* d_G, int npoints) noexcept {
+    int blocks = 0;
+    grid_blocks(npoints, blocks);
+    RealArrayMulRealArray_kernel<<<blocks, 256, 0, context.stream>>>(npoints,d_F,d_G);
+    return 0;
 }
 //
 int complex_gradient(const Context& context, const Fft3dPlan& fft, cuDoubleComplex* d_psi,
@@ -677,7 +712,7 @@ int fft_gradient(const Context& context, const Fft3dPlan& fft,
     return complex_gradient(context, fft, psi, result_x, result_y, result_z);
 }
 
-int fft_init(Context& context, Fft3dPlan*& fft_out,
+int creat_fftPlan(Context& context, Fft3dPlan*& fft_out,
              int nx, int ny, int nz,
              const double* h_latticeVectors) noexcept {
     fft_out = nullptr;
@@ -790,6 +825,71 @@ int creat_finitePlan(finitePlan& finite, int nx, int ny, int nz, int half_width,
     //
     delete[] h_coeff;
     return 0;
+}
+int CUDA_init(Context& context) noexcept {
+    // 拒绝覆盖已有资源。
+    if (context.stream || context.cublas ||
+        context.cusolver || context.fft)
+        return kInvalidState;
+
+    int count = 0;
+    if (cudaGetDeviceCount(&count) != cudaSuccess || count == 0)
+        return kCudaInitError;
+    constexpr int device_id = 0;
+
+    if (cudaSetDevice(device_id) != cudaSuccess)
+        return kCudaInitError;
+
+    // 所有步骤成功后，再交给调用者。
+    Context next{};
+    next.device_id = device_id;
+    next.device_count = count;
+
+    auto fail = [&](int error) noexcept {
+        if (next.cusolver)
+            cusolverDnDestroy(next.cusolver);
+        if (next.cublas)
+            cublasDestroy(next.cublas);
+        if (next.stream)
+            cudaStreamDestroy(next.stream);
+        return error;
+    };
+
+    if (cudaGetDeviceProperties(&next.device_properties, device_id) != cudaSuccess ||
+        cudaDriverGetVersion(&next.driver_version) != cudaSuccess ||
+        cudaRuntimeGetVersion(&next.runtime_version) != cudaSuccess)
+        return fail(kCudaInitError);
+
+    if (cudaStreamCreateWithFlags(
+            &next.stream, cudaStreamNonBlocking) != cudaSuccess)
+        return fail(kCudaInitError);
+
+    if (cublasCreate(&next.cublas) != CUBLAS_STATUS_SUCCESS)
+        return fail(kCublasError);
+
+    if (cublasSetStream(next.cublas, next.stream)
+            != CUBLAS_STATUS_SUCCESS)
+        return fail(kCublasError);
+
+    if (cublasSetPointerMode(
+            next.cublas, CUBLAS_POINTER_MODE_HOST)
+            != CUBLAS_STATUS_SUCCESS)
+        return fail(kCublasError);
+
+    if (cusolverDnCreate(&next.cusolver)
+            != CUSOLVER_STATUS_SUCCESS)
+        return fail(kCusolverError);
+
+    if (cusolverDnSetStream(next.cusolver, next.stream)
+            != CUSOLVER_STATUS_SUCCESS)
+        return fail(kCusolverError);
+
+    if (cudaMemGetInfo(&next.free_memory_bytes, &next.total_memory_bytes) != cudaSuccess)
+        return fail(kCudaInitError);
+
+    next.status = kSuccess;
+    context = next;
+    return kSuccess;
 }
 // __global__ void halo_fill_kernel(const finitePlan finite, double* d_input,double* d_output) {
 //     if (d_input == nullptr || d_output == nullptr) return;

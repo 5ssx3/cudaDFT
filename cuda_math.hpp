@@ -28,6 +28,9 @@ enum Status : int {
     kFftStreamError = 10,
     kFftExecuteError = 11,
     kFftDestroyError = 12,
+    kCudaInitError = 13,
+    kCublasError = 14,
+    kCusolverError = 15,
 };
 
 struct Context;
@@ -57,6 +60,13 @@ struct Context {
     cublasHandle_t cublas = nullptr;
     cusolverDnHandle_t cusolver = nullptr;
     int status = -1;
+    int device_count = 0;
+    cudaDeviceProp device_properties{};
+    int driver_version = 0;
+    int runtime_version = 0;
+    // 初始化完成时的显存快照，单位为字节。
+    std::size_t free_memory_bytes = 0;
+    std::size_t total_memory_bytes = 0;
 };
 
 struct finitePlan
@@ -82,6 +92,11 @@ const char* status_message(int status) noexcept;
 int upload(double* h_data, void** d_data, int npoints);
 
 int download(double* d_data, double* h_data, int npoints);
+// 自动选择 CUDA_VISIBLE_DEVICES 生效后的第一个可见设备（序号 0）。
+// 成功时选择该设备，保存设备信息，并创建绑定到同一流的 cuBLAS/cuSOLVER 句柄。
+// 版本号采用 CUDA 整数格式：1000 * major + 10 * minor。
+// 失败时返回 Status，context 保持不变；已有资源的 context 不允许重复初始化。
+int CUDA_init(Context& context) noexcept;
 
 // Scalar and small object inputs use values; large host objects use references.
 // Numerical buffers use pointers.
@@ -120,11 +135,15 @@ int ComplexReal_IntegralFGdV(const Context& context, const cuDoubleComplex* d_F,
                             const double* d_G, double dv,
                             int npoints, cuDoubleComplex* d_result) noexcept;
 
-// This is integral(F * G) dV, not the conjugated inner product integral(conj(F) * G) dV.
+// This is integral(conj(F) * G) dV,
 int ComplexComplex_IntegralFGdV(const Context& context, const cuDoubleComplex* d_F,
                                const cuDoubleComplex* d_G, double dv,
                                int npoints, cuDoubleComplex* d_result) noexcept;
-
+int RealReal_IntegralFGdV(const Context& context, const double* d_F,
+                               const double* d_G, double dv,
+                               int npoints, double* d_result) noexcept;
+int RealArrayMulRealArray(const Context& context, double* d_F,
+                               double* d_G, int npoints) noexcept;
 // FFT derivatives.
 int complex_gradient(const Context& context, const Fft3dPlan& fft, cuDoubleComplex* d_psi,
                      cuDoubleComplex* d_grad_psi_x, cuDoubleComplex* d_grad_psi_y,
@@ -167,7 +186,7 @@ int fft_gradient(const Context& context, const Fft3dPlan& fft,
                  cuDoubleComplex* psi, cuDoubleComplex* result_x,
                  cuDoubleComplex* result_y, cuDoubleComplex* result_z) noexcept;
 
-int fft_init(Context& context, Fft3dPlan*& fft_out,
+int creat_fftPlan(Context& context, Fft3dPlan*& fft_out,
              int nx, int ny, int nz,
              const double* h_latticeVectors) noexcept;
 

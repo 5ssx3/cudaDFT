@@ -164,7 +164,7 @@ int destory_LBFGSOptimizer(LBFGSState& lbfgs) {
     return report_lbfgs_status(result, "destory_LBFGSOptimizer", lbfgs);
 }
 int LBFGSOptimizer_init(Context& context,LBFGSState& lbfgs,int n, 
-    int history_capacity, calculate_F evaluate, void* user_data, double* d_x_guess){
+    int history_capacity, calculate_F evaluate, void* user_data, double* d_x_guess,double g_tol){
 
     if (n <= 0 || history_capacity <= 0 || evaluate == nullptr ||
         d_x_guess == nullptr || !valid_parameters(lbfgs))
@@ -190,6 +190,7 @@ int LBFGSOptimizer_init(Context& context,LBFGSState& lbfgs,int n,
     lbfgs.iterations = lbfgs.evaluations = 0;
     lbfgs.line_search_trials = 0;
     lbfgs.step_size = 0.0;
+    lbfgs.g_tol = g_tol;
     lbfgs.f = lbfgs.g_norm = std::numeric_limits<double>::quiet_NaN();
     auto fail = [&](int error) {
         report_lbfgs_status(error, "LBFGSOptimizer_init", lbfgs);
@@ -479,11 +480,12 @@ int LBFGSOptimizer(Context& context, LBFGSState& lbfgs, calculate_F evaluate, vo
         if (!CHECK_CUDA(cudaStreamSynchronize(context.stream))) result = kCudaSyncError;
         if (result == kLBFGSLineSearchLimitReached) {
             report(result);
-            return kSuccess;
+            return result;
         }
         if (result != kSuccess && result != kLBFGSConverged &&
             result != kLBFGSEvaluationError && result != kLBFGSLineSearchFailed)
             lbfgs.status = result;
+        if (result == kSuccess) write_log(lbfgs, result, "LBFGSOptimizer");
         return report(result);
     };
     if (!CHECK_CUBLAS(cublasDnrm2(context.cublas, static_cast<int>(lbfgs.n),
@@ -501,14 +503,14 @@ int LBFGSOptimizer(Context& context, LBFGSState& lbfgs, calculate_F evaluate, vo
     return finish(WolfeLineSearch(context, lbfgs, evaluate, user_data));
 }
 void write_log(const LBFGSState& lbfgs, int result, const char* stage) noexcept {
-    if (result == kSuccess) return;
     // 框内只用 ASCII 英文标签，终端中保持列宽一致；不额外下载设备数据。
     const char* border = "+------------------------------------------------------------------------------+\n";
     auto row = [](const char* label, const char* value) {
         std::fprintf(stderr, "| %-14s %-61.61s |\n", label, value);
     };
     char value[160];
-    const char* title = result == kLBFGSConverged ? "L-BFGS | CONVERGED" :
+    const char* title = result == kSuccess ? "L-BFGS | NEW_X" :
+        result == kLBFGSConverged ? "L-BFGS | CONVERGED" :
         result == kLBFGSLineSearchLimitReached ? "L-BFGS | WARNING" : "L-BFGS | FAILED";
     std::fprintf(stderr, "\n%s| %-76s |\n", border, title);
     row("Stage", stage);
