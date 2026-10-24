@@ -1,0 +1,4 @@
+test/*/results/DENSITY filter=lfs diff=lfs merge=lfs -text
+test/*/results/DENSITY_DIFFERENCE filter=lfs diff=lfs merge=lfs -text
+test/*/results/LOCPOT filter=lfs diff=lfs merge=lfs -text
+test/*/results/ORBITAL_* filter=lfs diff=lfs merge=lfs -text

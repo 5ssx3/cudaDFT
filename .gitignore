@@ -1,27 +1,3 @@
-# Local backups and validation artifacts
-/backup/
-/*_original_*/
-/lbfgs_status_*/
+# Local validation artifacts and editor settings
 /temp/
-
-# Build products
-/build/
-/cmake-build-*/
-CMakeFiles/
-CMakeCache.txt
-*.o
-*.obj
-*.a
-*.so
-*.so.*
-*.out
-*.exe
-*.ptx
-*.cubin
-*.fatbin
-
-# Runtime logs and editor temporary files
-*.log
-*.swp
-*.swo
-*~
+/src/.vscode/
