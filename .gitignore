@@ -1,7 +1,9 @@
 # Local validation artifacts and editor settings
 /temp/
+/.vscode/
 /src/.vscode/
 
 # CMake build products
 /build/
 /bin/
+/src/test

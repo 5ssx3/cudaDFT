@@ -12,6 +12,11 @@
 #include <cusolverDn.h>  // cusolverDnHandle_t
 
 #include <cstddef>
+
+/////////////////////////////////////////////////////////////////////////////////////////////////
+// CUDA 基础管理：公共类型、状态码、设备初始化、数据传输与尺寸检查
+/////////////////////////////////////////////////////////////////////////////////////////////////
+
 // Status values shared by the mathematical wrappers below. CUDA/cuFFT native
 // error codes are translated at their call sites, never returned as Status.
 enum Status : int {
@@ -85,6 +90,12 @@ struct finitePlan
 // Status messages.
 const char* status_message(int status) noexcept;
 
+// 自动选择 CUDA_VISIBLE_DEVICES 生效后的第一个可见设备（序号 0）。
+// 成功时选择该设备，保存设备信息，并创建绑定到同一流的 cuBLAS/cuSOLVER 句柄。
+// 版本号采用 CUDA 整数格式：1000 * major + 10 * minor。
+// 失败时返回 Status，context 保持不变；已有资源的 context 不允许重复初始化。
+int CUDA_init(Context& context) noexcept;
+
 // Host/device transfers.
 // upload allocates *d_data; the caller releases it with cudaFree after success.
 // Copy failures preserve kCudaMemcpyError. If cleanup also fails, *d_data keeps
@@ -92,11 +103,6 @@ const char* status_message(int status) noexcept;
 int upload(double* h_data, void** d_data, int npoints);
 
 int download(double* d_data, double* h_data, int npoints);
-// 自动选择 CUDA_VISIBLE_DEVICES 生效后的第一个可见设备（序号 0）。
-// 成功时选择该设备，保存设备信息，并创建绑定到同一流的 cuBLAS/cuSOLVER 句柄。
-// 版本号采用 CUDA 整数格式：1000 * major + 10 * minor。
-// 失败时返回 Status，context 保持不变；已有资源的 context 不允许重复初始化。
-int CUDA_init(Context& context) noexcept;
 
 // Scalar and small object inputs use values; large host objects use references.
 // Numerical buffers use pointers.
@@ -105,6 +111,10 @@ bool checked_product(std::size_t left, std::size_t right,
                      std::size_t& result) noexcept;
 
 int grid_blocks(int npoints, int& blocks) noexcept;
+
+/////////////////////////////////////////////////////////////////////////////////////////////////
+// FFT：计划管理、变换与微分接口
+/////////////////////////////////////////////////////////////////////////////////////////////////
 
 // FFT plans.
 int destroy_fft_plan(Fft3dPlan& fft) noexcept;
@@ -126,22 +136,6 @@ int complex_fft_inverse(const Context& context, const Fft3dPlan& fft,
 int real_fft_inverse(const Context& context, const Fft3dPlan& fft,
                      cuDoubleComplex* d_psi_fft, double* d_psi) noexcept;
 
-// Product integrals. Inputs are device arrays; the scalar result is returned on
-// the host after context.stream completes. On failure, h_result is unchanged.
-int RealReal_IntegralFGdV(const Context& context, const double* d_F,
-                         const double* d_G, double dv,
-                         int npoints, double& h_result) noexcept;
-
-int ComplexReal_IntegralFGdV(const Context& context, const cuDoubleComplex* d_F,
-                            const double* d_G, double dv,
-                            int npoints, cuDoubleComplex& h_result) noexcept;
-
-// This is integral(conj(F) * G) dV,
-int ComplexComplex_IntegralFGdV(const Context& context, const cuDoubleComplex* d_F,
-                               const cuDoubleComplex* d_G, double dv,
-                               int npoints, cuDoubleComplex& h_result) noexcept;
-int RealArrayMulRealArray(const Context& context, double* d_F,
-                               double* d_G, int npoints) noexcept;
 // FFT derivatives.
 int complex_gradient(const Context& context, const Fft3dPlan& fft, cuDoubleComplex* d_psi,
                      cuDoubleComplex* d_grad_psi_x, cuDoubleComplex* d_grad_psi_y,
@@ -188,7 +182,10 @@ int creat_fftPlan(Context& context, Fft3dPlan*& fft_out,
              int nx, int ny, int nz,
              const double* h_latticeVectors) noexcept;
 
-// Finite differences and Hamiltonian application.
+/////////////////////////////////////////////////////////////////////////////////////////////////
+// finite 有限差分：计划与微分接口
+/////////////////////////////////////////////////////////////////////////////////////////////////
+
 int creat_finitePlan(finitePlan& finite, int nx, int ny, int nz, int half_width,
                      double hx, double hy, double hz);
 
@@ -198,13 +195,38 @@ int apply_laplacian_finite(const Context& context, const finitePlan& finite,
 int apply_gradient_finite(const Context& context, const finitePlan& finite,
                     const double* d_psi, double* d_grad_psi_x, double* d_grad_psi_y, double* d_grad_psi_z) noexcept;
 
+/////////////////////////////////////////////////////////////////////////////////////////////////
+// CUDA 通用计算：数组运算与积分
+/////////////////////////////////////////////////////////////////////////////////////////////////
+
+// Product integrals. Inputs are device arrays; the scalar result is returned on
+// the host after context.stream completes. On failure, h_result is unchanged.
+int RealReal_IntegralFGdV(const Context& context, const double* d_F,
+                         const double* d_G, double dv,
+                         int npoints, double& h_result) noexcept;
+
+int ComplexReal_IntegralFGdV(const Context& context, const cuDoubleComplex* d_F,
+                            const double* d_G, double dv,
+                            int npoints, cuDoubleComplex& h_result) noexcept;
+
+// This is integral(conj(F) * G) dV,
+int ComplexComplex_IntegralFGdV(const Context& context, const cuDoubleComplex* d_F,
+                               const cuDoubleComplex* d_G, double dv,
+                               int npoints, cuDoubleComplex& h_result) noexcept;
+int RealArrayMulRealArray(const Context& context, double* d_F,
+                               double* d_G, int npoints) noexcept;
+
+int RealArrayMulReal(const Context& context, int n, double* d_RealArray, double a) noexcept;
+
+/////////////////////////////////////////////////////////////////////////////////////////////////
+// Davidson（戴维森）模块调用：哈密顿算符与预条件器
+/////////////////////////////////////////////////////////////////////////////////////////////////
+
 // Requires an initialized finitePlan. Execution is queued on context.stream;
 // synchronize the stream before reading results and to check execution errors.
 // Invalid arrays/grid/spacing/stencil return kInvalidArgument; an unready plan
 // returns kInvalidState, excessive grid size kSizeOverflow, and launch failures
 // kCudaLaunchError.
-int real_calrho(Context& context, double* d_occ, double* d_psi, 
-            int npoints, int nstates, double dV, double* d_rho) noexcept;
 int apply_HamiltonOperator(const Context& context, const finitePlan& finite,
                     const double* d_psi, const double* d_veff, double* d_Hpsi) noexcept;
 
@@ -215,7 +237,11 @@ int apply_davidson_preconditioner(
     const double* d_residual,   // 输入：一列残差，长度 npoints
     double* d_correction       // 输出：一列修正方向，长度 npoints
 ) noexcept;
-// lbfgs
+
+/////////////////////////////////////////////////////////////////////////////////////////////////
+// LBFGS 模块调用：两层循环向量更新
+/////////////////////////////////////////////////////////////////////////////////////////////////
+
 int update_q(Context& context,
     int n,
     double* q,
@@ -231,7 +257,13 @@ int update_r(Context& context,
     const double* b,
     const double* rho) noexcept;
 
-int RealArrayMulReal(const Context& context, int n, double* d_RealArray, double a) noexcept;
+/////////////////////////////////////////////////////////////////////////////////////////////////
+// IKS 模块调用：电子密度、正则项及其梯度贡献
+/////////////////////////////////////////////////////////////////////////////////////////////////
+
+int real_calrho(Context& context, double* d_occ, double* d_psi,
+            int npoints, int nstates, double dV, double* d_rho) noexcept;
+
 int finite_regularization(const Context& context, finitePlan& finite,
             const double* d_v, double dV, double eta, double& h_result) noexcept;
 int finite_regularization_contributeTograd(const Context& context,finitePlan& finite,

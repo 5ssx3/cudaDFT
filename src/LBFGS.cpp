@@ -491,11 +491,6 @@ int LBFGSOptimizer(Context& context, LBFGSState& lbfgs, calculate_F evaluate, vo
         if (result == kSuccess) write_log(lbfgs, result, "LBFGSOptimizer");
         return report(result);
     };
-    if (!CHECK_CUBLAS(cublasDnrm2(context.cublas, static_cast<int>(lbfgs.n),
-                                  lbfgs.d_g, 1, &lbfgs.g_norm)))
-        return finish(kLBFGSCublasError);
-    if (!std::isfinite(lbfgs.f) || !std::isfinite(lbfgs.g_norm))
-        return finish(kLBFGSNonFinite);
     if (lbfgs.g_norm <= lbfgs.g_tol) {
         return finish(kLBFGSConverged);
     }

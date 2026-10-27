@@ -25,15 +25,16 @@ struct InputParameters {
     struct Inversion {
         std::string initial_potential;
         double regularization_eta{};
+        double relative_rho_L2tol{}; // YAML: relativ_rho_L2tol
         int extra_states{};
 
         struct Eigensolver {
             std::string method;
-            double residual_tolerance{};
+            double residual_tolerance=1e-9;
             int max_subspace_dim{};
-            int max_iterations{};
+            int max_iterations=10000;
             int nextra_retain{};
-            double direction_tolerance{};
+            double direction_tolerance=1e-8;
         } eigensolver;
 
         struct Occupations {
@@ -44,15 +45,12 @@ struct InputParameters {
         struct Optimizer {
             std::string method;
             int history{};
-            int max_iterations{};
-            int max_linesearch_step{};
-            double c1{};
-            double c2{};
+            int max_iterations = 1000;
+            int max_linesearch_step = 50;
+            double gradient_tolerance = 5e-6;
+            double c1 = 1e-4;
+            double c2 = 0.9;
         } optimizer;
-
-        struct Convergence {
-            double gradient_tolerance{};
-        } convergence;
     } inversion;
 
     struct Output {

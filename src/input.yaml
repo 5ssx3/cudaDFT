@@ -19,6 +19,7 @@ mesh:
 inversion:
   initial_potential: zero
   regularization_eta: 1e-8
+  relativ_rho_L2tol: 5e-6
   extra_states: 4
 
   eigensolver:
@@ -38,11 +39,9 @@ inversion:
     history: 10
     max_iterations: 1000
     max_linesearch_step: 50
+    gradient_tolerance: 5.0e-6
     c1: 1.0e-4
     c2: 0.9
-
-  convergence:
-    gradient_tolerance: 5.0e-6
 
 # 5. 输出设置
 output:

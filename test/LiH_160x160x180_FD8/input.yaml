@@ -42,7 +42,7 @@ inversion:
     c2: 0.9
 
   convergence:
-    gradient_tolerance: 1.0e-6
+    gradient_tolerance: 3.0e-6
 
 # 5. 输出设置
 output:

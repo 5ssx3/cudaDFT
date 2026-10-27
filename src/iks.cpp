@@ -13,8 +13,7 @@
 #include <cstdlib>
 #include <iostream>
 #include <vector>
-#include <thrust/fill.h>
-#include <thrust/system/cuda/execution_policy.h>
+
 struct WS_data
 {
     int nx{};
@@ -24,14 +23,13 @@ struct WS_data
     int nstates{};
     double dV{};
     double eta{};
+    double rho0_nrom{};
     double* d_rho0{};
     double* d_rho{};
+    double* d_diff_rho{};
     double* d_veff{};
     double* d_lapl_v{};
     double* d_eigenvalues{};
-    double* d_grad_veff_x{};
-    double* d_grad_veff_y{};
-    double* d_grad_veff_z{};
     Context context{};
     finitePlan finite{};
     DavidsonPlan davidsonPlan{};
@@ -48,9 +46,7 @@ using calculate_F = int (*)(
 void destory_Ws_data(WS_data& Ws_data){
     if(Ws_data.d_rho)         cudaFree(Ws_data.d_rho);
     if(Ws_data.d_lapl_v)      cudaFree(Ws_data.d_lapl_v);
-    if(Ws_data.d_grad_veff_x) cudaFree(Ws_data.d_grad_veff_x);
-    if(Ws_data.d_grad_veff_y) cudaFree(Ws_data.d_grad_veff_y);
-    if(Ws_data.d_grad_veff_z) cudaFree(Ws_data.d_grad_veff_z);
+    if(Ws_data.d_diff_rho)    cudaFree(Ws_data.d_diff_rho);
     Ws_data = {};
 }
 void creat_WS_data(WS_data& Ws_data,Context context,InputParameters& parameters,DavidsonPlan& davidsonPlan,
@@ -76,13 +72,23 @@ void creat_WS_data(WS_data& Ws_data,Context context,InputParameters& parameters,
     size_t bytes = size_t(Ws_data.npoints)*sizeof(double);
     err = cudaMalloc(reinterpret_cast<void**>(&Ws_data.d_lapl_v),bytes);
     err = cudaMalloc(reinterpret_cast<void**>(&Ws_data.d_rho),bytes);
-    err = cudaMalloc(reinterpret_cast<void**>(&Ws_data.d_grad_veff_x),bytes);
-    err = cudaMalloc(reinterpret_cast<void**>(&Ws_data.d_grad_veff_y),bytes);
-    err = cudaMalloc(reinterpret_cast<void**>(&Ws_data.d_grad_veff_z),bytes);
+    err = cudaMalloc(reinterpret_cast<void**>(&Ws_data.d_diff_rho),bytes);
     if (err != cudaSuccess) {
-        std::fprintf(stderr, "[CUDA] cudaMemcpyAsync: %d (%s)\n",
+        std::fprintf(stderr, "[CUDA] cudaMalloc: %d (%s)\n",
                     static_cast<int>(err), cudaGetErrorString(err));
         return;
+    }
+    cublasStatus_t status;
+    status = cublasDnrm2(
+    context.cublas,
+    Ws_data.npoints,       // 元素数量
+    Ws_data.d_rho0,        // 设备端向量
+    1,                     // 元素间距
+    &Ws_data.rho0_nrom);
+    if (status != CUBLAS_STATUS_SUCCESS) {
+        std::fprintf(stderr, "[cuBLAS] cublasDnrm2: %d (%s)\n",
+                    static_cast<int>(status),
+                    cublasGetStatusName(status));
     }
 }
 int begin(InputParameters& parameters,Context& context, Occupation& occ,
@@ -153,9 +159,11 @@ int invks_scf(InputParameters& parameters, Context& context, WS_data& Ws_data, L
     std::fprintf(stderr, "\n%sIKS | INITIALIZATION\n", iks_separator);
     std::fprintf(stderr, "  Grid             %d x %d x %d (%zu points)\n",
                  Ws_data.nx, Ws_data.ny, Ws_data.nz, Ws_data.npoints);
-    std::fprintf(stderr, "  Occupied states  %d (2 electrons per state)\n", Ws_data.nstates);
+    std::fprintf(stderr, "  Computed states  %d\n", Ws_data.nstates);
+    std::fprintf(stderr, "  Electrons        %d\n", Ws_data.occ.ne);
+    std::fprintf(stderr, "  Occupation mode  %s\n", Ws_data.occ.occ_mode.c_str());
     std::fprintf(stderr, "  Outer limit      %d\n  Gradient tol     %.6e\n\n",
-                 max_interation, parameters.inversion.convergence.gradient_tolerance);
+                 max_interation, parameters.inversion.optimizer.gradient_tolerance);
     // 准备 context、n、history_capacity、d_x_guess 和 data ...
 
     calculate_F iks_Ws = [](
@@ -198,31 +206,6 @@ int invks_scf(InputParameters& parameters, Context& context, WS_data& Ws_data, L
         double* d_psi = davidsonPlan.d_psi;
         ierr = calculate_rho(Ws_data.context,occ,d_eigenvalues,npoints,dV,d_psi,d_rho);
         if (ierr != kSuccess) return ierr;
-        // RealArrayMulRealArray(context,d_psi,d_psi,npoints * nstates);
-        // double alpha = 2.0/dV;
-        // double beta  = 0.0;
-        // double* d_ones = nullptr;
-        // cudaError_t err = cudaMalloc(
-        //     reinterpret_cast<void**>(&d_ones),
-        //     size_t(nstates) * sizeof(double)
-        // );
-        // thrust::fill(
-        //     thrust::cuda::par.on(context.stream),
-        //     d_ones,
-        //     d_ones + nstates,
-        //     1.0
-        // );
-        // cublasStatus_t status = cublasDgemv(
-        //     context.cublas,
-        //     CUBLAS_OP_N,
-        //     npoints, nstates,
-        //     &alpha,
-        //     d_psi, npoints,
-        //     d_ones, 1,
-        //     &beta,
-        //     d_rho, 1
-        // );
-        // g=rho0
         f=0;
         download(d_eigenvalues,h_eigenvalues.data(),nstates);
         download(occ.d_occupation,h_occ.data(),nstates);
@@ -235,8 +218,9 @@ int invks_scf(InputParameters& parameters, Context& context, WS_data& Ws_data, L
         // punishment
         double pun = 0.0;
         ierr=finite_regularization(context,finite,d_v,dV,eta,pun);
+        if (ierr != kSuccess) return ierr;
         f += pun;
-        //
+        // g=rho0
         cublasStatus_t status;
         status = cublasDcopy(
             context.cublas, npoints,
@@ -251,7 +235,7 @@ int invks_scf(InputParameters& parameters, Context& context, WS_data& Ws_data, L
             context.cublas, npoints,
             &dV, d_g, 1);
         if (status != CUBLAS_STATUS_SUCCESS) {
-            std::fprintf(stderr, "[cuBLAS] cublasDnrm2: %d (%s)\n",
+            std::fprintf(stderr, "[cuBLAS] cublasDscal: %d (%s)\n",
                         static_cast<int>(status),
                         cublasGetStatusName(status));
             return kCublasError;
@@ -262,6 +246,12 @@ int invks_scf(InputParameters& parameters, Context& context, WS_data& Ws_data, L
         status = cublasDaxpy(
             context.cublas, npoints,
             &one, Ws_data.d_lapl_v, 1, d_g, 1);
+        if (status != CUBLAS_STATUS_SUCCESS) {
+            std::fprintf(stderr, "[cuBLAS] cublasDscal: %d (%s)\n",
+                        static_cast<int>(status),
+                        cublasGetStatusName(status));
+            return kCublasError;
+        }
         //
         return 0;  // 实际计算成功后返回 0，失败则返回错误码
     };
@@ -277,7 +267,7 @@ int invks_scf(InputParameters& parameters, Context& context, WS_data& Ws_data, L
     }
     int n = Ws_data.npoints;
     int history_capacity=parameters.inversion.optimizer.history;
-    double g_tol = parameters.inversion.convergence.gradient_tolerance;
+    double g_tol = parameters.inversion.optimizer.gradient_tolerance;
     double c1 = parameters.inversion.optimizer.c1;
     double c2 = parameters.inversion.optimizer.c2;
     double max_linesearch_step = parameters.inversion.optimizer.max_linesearch_step;
@@ -289,6 +279,13 @@ int invks_scf(InputParameters& parameters, Context& context, WS_data& Ws_data, L
     d_x_guess = nullptr;
     if (result != 0)
         return finish(result);
+    //
+    double relative_rho_L2tol = parameters.inversion.relative_rho_L2tol;
+    cublasStatus_t status;
+    const double minus_one = -1.0;
+    int retry = 0;
+    int max_retry = 100;
+    double relative_rho_L2norm = 1000.0;
     for(int i=0;i<max_interation;i++){
         outer_iterations = i + 1;
         const auto step_start = std::chrono::steady_clock::now();
@@ -297,7 +294,7 @@ int invks_scf(InputParameters& parameters, Context& context, WS_data& Ws_data, L
         std::fprintf(stderr, "\n%sIKS | OUTER ITERATION %d / %d\n\n",
                      iks_separator, outer_iterations, max_interation);
         
-        result = LBFGSOptimizer(context, lbfgs, iks_Ws, &Ws_data);
+        result = LBFGSOptimizer(context, lbfgs, iks_Ws, &Ws_data);\
         const double step_seconds = std::chrono::duration<double>(
             std::chrono::steady_clock::now() - step_start).count();
         std::fprintf(stderr,
@@ -308,9 +305,55 @@ int invks_scf(InputParameters& parameters, Context& context, WS_data& Ws_data, L
                      lbfgs.evaluations - evaluations_before, step_seconds);
         if (result == kLBFGSLineSearchLimitReached)
             std::fprintf(stderr, "  Warning          Line search limit; accepted point retained.\n");
-        if (result == kLBFGSConverged) break;
+        
+        if (result == kLBFGSConverged){
+            // diff = rho
+            status = cublasDcopy(
+                context.cublas, Ws_data.npoints,
+                Ws_data.d_rho, 1, Ws_data.d_diff_rho, 1);
+            if (status != CUBLAS_STATUS_SUCCESS) {
+                std::fprintf(stderr, "[cuBLAS] cublasDscal: %d (%s)\n",
+                            static_cast<int>(status),
+                            cublasGetStatusName(status));
+            }
+            // diff = rho-rho0
+            status = cublasDaxpy(
+                        context.cublas, Ws_data.npoints,
+                        &minus_one, Ws_data.d_rho0, 1, Ws_data.d_diff_rho, 1);
+            if (status != CUBLAS_STATUS_SUCCESS) {
+                std::fprintf(stderr, "[cuBLAS] cublasDscal: %d (%s)\n",
+                            static_cast<int>(status),
+                            cublasGetStatusName(status));
+            }
+            // relative_rho_L2norm = diff_norm
+            status = cublasDnrm2(
+            context.cublas,
+            Ws_data.npoints,       // 元素数量
+            Ws_data.d_diff_rho,    // 设备端向量
+            1,                     // 元素间距
+            &relative_rho_L2norm);
+            if (status != CUBLAS_STATUS_SUCCESS) {
+                std::fprintf(stderr, "[cuBLAS] cublasDscal: %d (%s)\n",
+                            static_cast<int>(status),
+                            cublasGetStatusName(status));
+            }
+            // relative_rho_L2norm = diff_norm/rho_norm
+            relative_rho_L2norm = relative_rho_L2norm/Ws_data.rho0_nrom;
+            if(relative_rho_L2norm < relative_rho_L2tol) break;
+            if (retry >= max_retry) {
+                std::fprintf(stderr, "Density tolerance not reached.\n");
+                result = -401;
+                break;
+            }
+            retry++;
+            lbfgs.g_norm=1+parameters.inversion.optimizer.gradient_tolerance;
+        }
         if (result == kLBFGSLineSearchLimitReached) continue;  // 可重试警告
-        if (result != kSuccess) break;
+        if (result != kSuccess && result != kLBFGSConverged) break;
+    }
+    if(!(relative_rho_L2norm < relative_rho_L2tol)){
+        std::fprintf(stderr, "Density tolerance not reached.\n");
+        result = -401;
     }
     return finish(result);
 }
@@ -387,7 +430,7 @@ int main(int argc, char** argv)
         return result;
     };
 
-    // 直接初始化 WS_data 内的计划，求解和释放使用同一份状态。
+
     int result = begin(parameters, context, occ, Ws_data.finite, Ws_data.davidsonPlan,
                        structgrid, Ws_data, d_rho0, filename, error);
     if (result != kSuccess) {
@@ -399,15 +442,6 @@ int main(int argc, char** argv)
         return finish(EXIT_FAILURE);
     }
 
-    const auto& out = parameters.output;
-    if (out.write_density || out.write_density_difference || out.write_wave || out.write_eigenvalues) {
-        // 回调曾原地平方 d_psi；在最终接受势上恢复带符号的本征轨道。
-        result = DavidsonSolver(context, Ws_data.finite, Ws_data.davidsonPlan, lbfgs.d_x);
-        if (result != kSuccess) {
-            std::cerr << "Final Davidson solve failed: " << davidson_status_message(result) << '\n';
-            return finish(EXIT_FAILURE);
-        }
-    }
     result = write_results(context, parameters, structgrid, lbfgs, Ws_data.davidsonPlan, error);
     if (result != kSuccess) {
         std::cerr << error << '\n';

@@ -139,10 +139,11 @@ int read_parameters(const std::string& filename,
                 "mesh.finite_half_width", "half width exceeds grid dimensions");
 
         const auto inversion = root["inversion"];
-        check_mapping(inversion, "inversion", {"initial_potential", "regularization_eta", "extra_states",
-                      "eigensolver", "occupations", "optimizer", "convergence"});
+        check_mapping(inversion, "inversion", {"initial_potential", "regularization_eta", "relativ_rho_L2tol",
+                      "extra_states", "eigensolver", "occupations", "optimizer"});
         parsed.inversion.initial_potential = choice(inversion, "initial_potential", "inversion", "zero");
         parsed.inversion.regularization_eta = number(inversion, "regularization_eta", "inversion", false);
+        parsed.inversion.relative_rho_L2tol = number(inversion, "relativ_rho_L2tol", "inversion", true);
         parsed.inversion.extra_states = integer(inversion, "extra_states", "inversion", 0);
 
         const auto eigensolver = inversion["eigensolver"];
@@ -170,21 +171,18 @@ int read_parameters(const std::string& filename,
 
         const auto optimizer = inversion["optimizer"];
         const std::string opt_path = "inversion.optimizer";
-        check_mapping(optimizer, opt_path, {"method", "history", "max_iterations", "max_linesearch_step", "c1", "c2"});
+        check_mapping(optimizer, opt_path, {"method", "history", "max_iterations", "max_linesearch_step",
+                      "gradient_tolerance", "c1", "c2"});
         auto& opt = parsed.inversion.optimizer;
         opt.method = choice(optimizer, "method", opt_path, "lbfgs");
         opt.history = integer(optimizer, "history", opt_path, 1);
         opt.max_iterations = integer(optimizer, "max_iterations", opt_path, 1);
         opt.max_linesearch_step = integer(optimizer, "max_linesearch_step", opt_path, 1);
+        opt.gradient_tolerance = number(optimizer, "gradient_tolerance", opt_path, false);
         opt.c1 = number(optimizer, "c1", opt_path, true);
         opt.c2 = number(optimizer, "c2", opt_path, true);
         require(opt.c1 < 1, opt_path + ".c1", "must be < 1");
         require(opt.c1 < opt.c2 && opt.c2 < 1, opt_path + ".c2", "must satisfy c1 < c2 < 1");
-
-        const auto convergence = inversion["convergence"];
-        check_mapping(convergence, "inversion.convergence", {"gradient_tolerance"});
-        auto& conv = parsed.inversion.convergence;
-        conv.gradient_tolerance = number(convergence, "gradient_tolerance", "inversion.convergence", false);
 
         const auto output = root["output"];
         check_mapping(output, "output", {"directory", "write_veff", "write_density", "write_density_difference",
