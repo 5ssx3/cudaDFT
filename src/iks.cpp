@@ -4,8 +4,10 @@
 #include "read_input.hpp"
 #include "structure.hpp"
 #include "write.hpp"
+#include "smearing.hpp"
 
 #include <cstddef>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -21,12 +23,19 @@ struct WS_data
     size_t npoints{};
     int nstates{};
     double dV{};
+    double eta{};
     double* d_rho0{};
     double* d_rho{};
     double* d_veff{};
+    double* d_lapl_v{};
     double* d_eigenvalues{};
+    double* d_grad_veff_x{};
+    double* d_grad_veff_y{};
+    double* d_grad_veff_z{};
+    Context context{};
     finitePlan finite{};
     DavidsonPlan davidsonPlan{};
+    Occupation occ{};
 };
 
 using calculate_F = int (*)(
@@ -36,9 +45,16 @@ using calculate_F = int (*)(
     double* d_g,        // 输出：设备上的梯度
     void* user_data     // 外部计算所需的数据
 );
-
-void creat_WS_data(WS_data& Ws_data,InputParameters& parameters,DavidsonPlan& davidsonPlan,
-        StructGrid& structgrid, finitePlan& finite, double* d_rho0)
+void destory_Ws_data(WS_data& Ws_data){
+    if(Ws_data.d_rho)         cudaFree(Ws_data.d_rho);
+    if(Ws_data.d_lapl_v)      cudaFree(Ws_data.d_lapl_v);
+    if(Ws_data.d_grad_veff_x) cudaFree(Ws_data.d_grad_veff_x);
+    if(Ws_data.d_grad_veff_y) cudaFree(Ws_data.d_grad_veff_y);
+    if(Ws_data.d_grad_veff_z) cudaFree(Ws_data.d_grad_veff_z);
+    Ws_data = {};
+}
+void creat_WS_data(WS_data& Ws_data,Context context,InputParameters& parameters,DavidsonPlan& davidsonPlan,
+        StructGrid& structgrid, finitePlan& finite, Occupation& occ,double* d_rho0)
 {
     int nx = structgrid.rgrids[0];
     int ny = structgrid.rgrids[1];
@@ -53,9 +69,23 @@ void creat_WS_data(WS_data& Ws_data,InputParameters& parameters,DavidsonPlan& da
     Ws_data.d_eigenvalues = davidsonPlan.d_eigenvalues;
     Ws_data.davidsonPlan = davidsonPlan;
     Ws_data.finite = finite;
-    cudaMalloc(reinterpret_cast<void**>(&Ws_data.d_rho),size_t(Ws_data.npoints)*sizeof(double));
+    Ws_data.occ = occ;
+    Ws_data.context = context;
+    Ws_data.eta = parameters.inversion.regularization_eta;
+    cudaError_t err;
+    size_t bytes = size_t(Ws_data.npoints)*sizeof(double);
+    err = cudaMalloc(reinterpret_cast<void**>(&Ws_data.d_lapl_v),bytes);
+    err = cudaMalloc(reinterpret_cast<void**>(&Ws_data.d_rho),bytes);
+    err = cudaMalloc(reinterpret_cast<void**>(&Ws_data.d_grad_veff_x),bytes);
+    err = cudaMalloc(reinterpret_cast<void**>(&Ws_data.d_grad_veff_y),bytes);
+    err = cudaMalloc(reinterpret_cast<void**>(&Ws_data.d_grad_veff_z),bytes);
+    if (err != cudaSuccess) {
+        std::fprintf(stderr, "[CUDA] cudaMemcpyAsync: %d (%s)\n",
+                    static_cast<int>(err), cudaGetErrorString(err));
+        return;
+    }
 }
-int begin(InputParameters& parameters,Context& context,
+int begin(InputParameters& parameters,Context& context, Occupation& occ,
             finitePlan& finite, DavidsonPlan& davidsonPlan,
             StructGrid& structgrid, WS_data& Ws_data, double*& d_rho0,
             const std::string& filename, std::string& error)
@@ -69,7 +99,7 @@ int begin(InputParameters& parameters,Context& context,
     int nz = parameters.mesh.rgrids[2];
     ierr = creat_StructGrid(parameters, structgrid, error);
     if (ierr != kSuccess) return ierr;
-    int nstates = structgrid.electron_number / 2;
+    int nstates = structgrid.electron_number / 2 + parameters.inversion.extra_states;
     ierr = read_density_input(parameters.system.density_file, structgrid, error);
     if (ierr != kSuccess) return ierr;
     ierr = CUDA_init(context);
@@ -77,14 +107,14 @@ int begin(InputParameters& parameters,Context& context,
     ierr = upload(structgrid.target_density.data(),reinterpret_cast<void**>(&d_rho0),structgrid.npoints);
     if (ierr != kSuccess) return ierr;
     // init solver
-    int extra_states = parameters.inversion.eigensolver.nextra_retain;
+    int nextra_retain = parameters.inversion.eigensolver.nextra_retain;
     int max_subspace_dim = parameters.inversion.eigensolver.max_subspace_dim;
     int max_iterations = parameters.inversion.eigensolver.max_iterations;
     double residual_tolerance = parameters.inversion.eigensolver.residual_tolerance;
+    double direction_tolerance = parameters.inversion.eigensolver.direction_tolerance;
     ierr = DavidsonSolver_init(context, davidsonPlan,nstates,nx, ny, nz,
-         extra_states,max_subspace_dim,max_iterations,residual_tolerance);
-    if (ierr != kSuccess) return ierr;
-    davidsonPlan.tNorm_tol = parameters.inversion.eigensolver.direction_tolerance;
+         nextra_retain,direction_tolerance,max_subspace_dim,max_iterations,residual_tolerance);
+    if (ierr != kSuccess && ierr != kDavidsonMaxIterations) return ierr;
     // init finite
     int half_width = parameters.mesh.finite_difference_halfwidth;
     double gx = structgrid.gap[0];
@@ -92,21 +122,40 @@ int begin(InputParameters& parameters,Context& context,
     double gz = structgrid.gap[2];
     ierr = creat_finitePlan(finite,nx,ny,nz,half_width,gx,gy,gz);
     if (ierr != kSuccess) return ierr;
+    // inti occupation
+    std::string occ_mode = parameters.inversion.occupations.method;
+    double T = parameters.inversion.occupations.temperature;
+    int ne = structgrid.electron_number;
+    ierr = Occupation_init(context,occ,occ_mode,nstates,ne,T);
+    if (ierr != kSuccess) return ierr;
     //
-    creat_WS_data(Ws_data, parameters, davidsonPlan, structgrid, finite, d_rho0);
+    creat_WS_data(Ws_data, context, parameters, davidsonPlan, structgrid, finite, occ, d_rho0);
     return Ws_data.d_rho ? kSuccess : kAllocationError;
 }
+namespace {
+constexpr char iks_separator[] =
+    "================================================================================================\n";
+}
 void write_SummaryLogs(const LBFGSState& lbfgs, int result,
-                       int outer_iterations, int max_iterations);
+                       int outer_iterations, int max_iterations, double elapsed_seconds);
 // lbfgs 由调用方持有，输出完成后再销毁，保留最终接受的势。
 int invks_scf(InputParameters& parameters, Context& context, WS_data& Ws_data, LBFGSState& lbfgs)
 {
     const int max_interation = parameters.inversion.optimizer.max_iterations;
     int outer_iterations = 0;
+    const auto inversion_start = std::chrono::steady_clock::now();
     auto finish = [&](int result) {
-        write_SummaryLogs(lbfgs, result, outer_iterations, max_interation);
+        const double elapsed_seconds = std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - inversion_start).count();
+        write_SummaryLogs(lbfgs, result, outer_iterations, max_interation, elapsed_seconds);
         return result;
     };
+    std::fprintf(stderr, "\n%sIKS | INITIALIZATION\n", iks_separator);
+    std::fprintf(stderr, "  Grid             %d x %d x %d (%zu points)\n",
+                 Ws_data.nx, Ws_data.ny, Ws_data.nz, Ws_data.npoints);
+    std::fprintf(stderr, "  Occupied states  %d (2 electrons per state)\n", Ws_data.nstates);
+    std::fprintf(stderr, "  Outer limit      %d\n  Gradient tol     %.6e\n\n",
+                 max_interation, parameters.inversion.convergence.gradient_tolerance);
     // 准备 context、n、history_capacity、d_x_guess 和 data ...
 
     calculate_F iks_Ws = [](
@@ -123,74 +172,97 @@ int invks_scf(InputParameters& parameters, Context& context, WS_data& Ws_data, L
         double* d_rho0 = Ws_data.d_rho0;
         double* d_rho = Ws_data.d_rho;
         const double* d_v = d_x;
+        double eta = Ws_data.eta;
         double* d_eigenvalues = Ws_data.d_eigenvalues;
         double dV = Ws_data.dV;
         size_t npoints = Ws_data.npoints;
         int nstates = Ws_data.nstates;
         std::vector<double> h_eigenvalues(nstates);
-        const finitePlan& finite = Ws_data.finite;
+        std::vector<double> h_occ(nstates);
+        finitePlan& finite = Ws_data.finite;
         DavidsonPlan& davidsonPlan = Ws_data.davidsonPlan;
+        Occupation& occ = Ws_data.occ;
         //
         int ierr = DavidsonSolver(context, finite, davidsonPlan, d_v);
+        for (int retry = 0;
+            ierr == kDavidsonMaxIterations && retry < 10;
+            ++retry)
+        {
+            std::fprintf(stderr,
+            "[IKS] Davidson iteration limit; continue %d / 10\n",
+                        retry + 1);
+
+            ierr = DavidsonSolver(context, finite, davidsonPlan, d_v);
+        }
         if (ierr != kSuccess) return ierr;
         double* d_psi = davidsonPlan.d_psi;
-        RealArrayMulRealArray(context,d_psi,d_psi,npoints * nstates);
-        double alpha = 2.0/dV;
-        double beta  = 0.0;
-        double* d_ones = nullptr;
-        cudaError_t err = cudaMalloc(
-            reinterpret_cast<void**>(&d_ones),
-            size_t(nstates) * sizeof(double)
-        );
-        thrust::fill(
-            thrust::cuda::par.on(context.stream),
-            d_ones,
-            d_ones + nstates,
-            1.0
-        );
-        cublasStatus_t status = cublasDgemv(
-            context.cublas,
-            CUBLAS_OP_N,
-            npoints, nstates,
-            &alpha,
-            d_psi, npoints,
-            d_ones, 1,
-            &beta,
-            d_rho, 1
-        );
+        ierr = calculate_rho(Ws_data.context,occ,d_eigenvalues,npoints,dV,d_psi,d_rho);
+        if (ierr != kSuccess) return ierr;
+        // RealArrayMulRealArray(context,d_psi,d_psi,npoints * nstates);
+        // double alpha = 2.0/dV;
+        // double beta  = 0.0;
+        // double* d_ones = nullptr;
+        // cudaError_t err = cudaMalloc(
+        //     reinterpret_cast<void**>(&d_ones),
+        //     size_t(nstates) * sizeof(double)
+        // );
+        // thrust::fill(
+        //     thrust::cuda::par.on(context.stream),
+        //     d_ones,
+        //     d_ones + nstates,
+        //     1.0
+        // );
+        // cublasStatus_t status = cublasDgemv(
+        //     context.cublas,
+        //     CUBLAS_OP_N,
+        //     npoints, nstates,
+        //     &alpha,
+        //     d_psi, npoints,
+        //     d_ones, 1,
+        //     &beta,
+        //     d_rho, 1
+        // );
+        // g=rho0
+        f=0;
+        download(d_eigenvalues,h_eigenvalues.data(),nstates);
+        download(occ.d_occupation,h_occ.data(),nstates);
+        for(int i=0;i<nstates;i++) f -= h_occ[i]*h_eigenvalues[i];
+        //
+        double h_vrho = 0.0;
+        ierr = RealReal_IntegralFGdV(context,d_v,d_rho0,dV,npoints,h_vrho);
+        if (ierr != kSuccess) return ierr;
+        f += h_vrho;
+        // punishment
+        double pun = 0.0;
+        ierr=finite_regularization(context,finite,d_v,dV,eta,pun);
+        f += pun;
+        //
+        cublasStatus_t status;
         status = cublasDcopy(
             context.cublas, npoints,
             d_rho0, 1, d_g, 1);
-
+        // g=rho0-rho
         const double minus_one = -1.0;
         status = cublasDaxpy(
             context.cublas, npoints,
             &minus_one, d_rho, 1, d_g, 1);
-
+        // g=[rho0-rho]*dv
         status = cublasDscal(
             context.cublas, npoints,
             &dV, d_g, 1);
-        // RealArrayMulReal(context,npoints,d_g,dV);
-        //
-        f=0;
-        download(d_eigenvalues,h_eigenvalues.data(),nstates);
-        for(int i=0;i<nstates;i++) f -= 2.0 * h_eigenvalues[i];
-        double* d_vrho = nullptr;
-        double h_vrho = 0.0;
-        cudaMalloc(reinterpret_cast<void**>(&d_vrho),sizeof(double));
-        RealReal_IntegralFGdV(context,d_v,d_rho0,dV,npoints,d_vrho);
-        // download 使用默认流，先等待 context.stream 中的积分完成。
-        err = cudaStreamSynchronize(context.stream);
-        if (err != cudaSuccess) {
-            cudaFree(d_ones);
-            cudaFree(d_vrho);
-            return kCudaSyncError;
+        if (status != CUBLAS_STATUS_SUCCESS) {
+            std::fprintf(stderr, "[cuBLAS] cublasDnrm2: %d (%s)\n",
+                        static_cast<int>(status),
+                        cublasGetStatusName(status));
+            return kCublasError;
         }
-        download(d_vrho, &h_vrho, 1);
-        f += h_vrho;
+        // g=[rho0-rho]*dv-2*eta*Lv*dv
+        ierr = finite_regularization_contributeTograd(context,finite,d_v,eta,dV,Ws_data.d_lapl_v);
+        const double one = 1.0;
+        status = cublasDaxpy(
+            context.cublas, npoints,
+            &one, Ws_data.d_lapl_v, 1, d_g, 1);
         //
-        cudaFree(d_ones);
-        cudaFree(d_vrho);
         return 0;  // 实际计算成功后返回 0，失败则返回错误码
     };
     ////////////////////////////////////////////////////////////////
@@ -206,8 +278,11 @@ int invks_scf(InputParameters& parameters, Context& context, WS_data& Ws_data, L
     int n = Ws_data.npoints;
     int history_capacity=parameters.inversion.optimizer.history;
     double g_tol = parameters.inversion.convergence.gradient_tolerance;
+    double c1 = parameters.inversion.optimizer.c1;
+    double c2 = parameters.inversion.optimizer.c2;
+    double max_linesearch_step = parameters.inversion.optimizer.max_linesearch_step;
     int result = LBFGSOptimizer_init(
-        context, lbfgs, n, history_capacity,
+        context, lbfgs, n, c1, c2, max_linesearch_step, history_capacity,
         iks_Ws, &Ws_data, d_x_guess, g_tol
     );
     cudaFree(d_x_guess);
@@ -216,7 +291,23 @@ int invks_scf(InputParameters& parameters, Context& context, WS_data& Ws_data, L
         return finish(result);
     for(int i=0;i<max_interation;i++){
         outer_iterations = i + 1;
+        const auto step_start = std::chrono::steady_clock::now();
+        const size_t accepted_before = lbfgs.iterations;
+        const size_t evaluations_before = lbfgs.evaluations;
+        std::fprintf(stderr, "\n%sIKS | OUTER ITERATION %d / %d\n\n",
+                     iks_separator, outer_iterations, max_interation);
+        
         result = LBFGSOptimizer(context, lbfgs, iks_Ws, &Ws_data);
+        const double step_seconds = std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - step_start).count();
+        std::fprintf(stderr,
+                     "IKS step %d: result %d (%s)\n"
+                     "  This step        %zu accepted / %zu evaluations / %.3f s\n",
+                     outer_iterations, result, lbfgs_status_message(result),
+                     lbfgs.iterations - accepted_before,
+                     lbfgs.evaluations - evaluations_before, step_seconds);
+        if (result == kLBFGSLineSearchLimitReached)
+            std::fprintf(stderr, "  Warning          Line search limit; accepted point retained.\n");
         if (result == kLBFGSConverged) break;
         if (result == kLBFGSLineSearchLimitReached) continue;  // 可重试警告
         if (result != kSuccess) break;
@@ -224,7 +315,7 @@ int invks_scf(InputParameters& parameters, Context& context, WS_data& Ws_data, L
     return finish(result);
 }
 void write_SummaryLogs(const LBFGSState& lbfgs, int result,
-                       int outer_iterations, int max_iterations)
+                       int outer_iterations, int max_iterations, double elapsed_seconds)
 {
     const bool outer_limit = outer_iterations >= max_iterations &&
         (result == kSuccess || result == kLBFGSLineSearchLimitReached);
@@ -232,12 +323,11 @@ void write_SummaryLogs(const LBFGSState& lbfgs, int result,
         outer_limit ? "IKS | OUTER LIMIT" :
         result == kLBFGSLineSearchLimitReached ? "IKS | LINE SEARCH LIMIT" : "IKS | FAILED";
     const char* reason = outer_limit ? "Outer iteration limit reached" : lbfgs_status_message(result);
-    const char* border = "+------------------------------------------------------------------------------+\n";
     auto row = [](const char* label, const char* value) {
-        std::fprintf(stderr, "| %-14s %-61.61s |\n", label, value);
+        std::fprintf(stderr, "  %-16s %s\n", label, value);
     };
     char value[160];
-    std::fprintf(stderr, "\n%s| %-76s |\n", border, title);
+    std::fprintf(stderr, "\n%s%s\n", iks_separator, title);
     row("Reason", reason);
     std::snprintf(value, sizeof(value), "%d / %d", outer_iterations, max_iterations);
     row("Outer calls", value);
@@ -263,7 +353,9 @@ void write_SummaryLogs(const LBFGSState& lbfgs, int result,
         std::snprintf(value, sizeof(value), "%.6e", lbfgs.step_size);
         row("Step size", value);
     }
-    std::fprintf(stderr, "%s", border);
+    std::snprintf(value, sizeof(value), "%.3f s (initial evaluation and outer steps)", elapsed_seconds);
+    row("Inversion time", value);
+    std::fprintf(stderr, "%s", iks_separator);
 }
 int main(int argc, char** argv)
 {
@@ -277,12 +369,14 @@ int main(int argc, char** argv)
     StructGrid structgrid{};
     WS_data Ws_data{};
     LBFGSState lbfgs{};
+    Occupation occ{};
     double* d_rho0 = nullptr;
     std::string error;
     auto finish = [&](int result) {
         if (context.stream) cudaStreamSynchronize(context.stream);
         destory_LBFGSOptimizer(lbfgs);
         reset_DavidsonSolver(Ws_data.davidsonPlan);
+        destroy_Occupation(occ);
         cudaFree(Ws_data.d_rho);
         cudaFree(d_rho0);
         cudaFree(const_cast<double*>(Ws_data.finite.d_coeff));
@@ -294,7 +388,7 @@ int main(int argc, char** argv)
     };
 
     // 直接初始化 WS_data 内的计划，求解和释放使用同一份状态。
-    int result = begin(parameters, context, Ws_data.finite, Ws_data.davidsonPlan,
+    int result = begin(parameters, context, occ, Ws_data.finite, Ws_data.davidsonPlan,
                        structgrid, Ws_data, d_rho0, filename, error);
     if (result != kSuccess) {
         std::cerr << "Initialization failed (" << result << "): " << error << '\n';

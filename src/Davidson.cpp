@@ -32,8 +32,10 @@ const char* davidson_status_message(int status) noexcept
 namespace {
 int report_davidson_status(int status, const char* stage, int iteration = 0) noexcept
 {
-    std::fprintf(stderr, "[Davidson] stage=%s, status=%d (%s)",
-                 stage, status, davidson_status_message(status));
+    std::fprintf(stderr, "[Davidson] stage=%s, status=%d (%s%s)",
+                 stage, status,
+                 status == kDavidsonMaxIterations ? "Warning: " : "",
+                 davidson_status_message(status));
     if (iteration > 0) std::fprintf(stderr, ", iteration=%d", iteration);
     std::fprintf(stderr, "\n");
     return status;
@@ -246,12 +248,12 @@ int reset_DavidsonSolver(DavidsonPlan& davidsonPlan){
     return kSuccess;
 }
 int DavidsonSolver_init(Context& context, DavidsonPlan& davidsonPlan,int num_states,
-            int nx, int ny, int nz, int nextra_retain,
+            int nx, int ny, int nz, int nextra_retain,double direction_tolerance,
             int max_subspace_dim,int max_iterations,double residual_tol)noexcept
 {
-    if (nx <= 0 || ny <= 0 || nz <= 0 || num_states <= 0 ||
+    if (nx <= 0 || ny <= 0 || nz <= 0 || num_states <= 0 || direction_tolerance<=0 ||
         max_subspace_dim <= num_states || nextra_retain < 0 ||
-        nextra_retain >= max_subspace_dim - num_states || max_iterations <= 0 ||
+        nextra_retain >= max_subspace_dim - num_states || max_iterations <= 1 ||
         !std::isfinite(residual_tol) || residual_tol <= 0.0)
         return report_davidson_status(kInvalidArgument, "DavidsonSolver_init");
     if (davidsonPlan.status == kSuccess || davidsonPlan.d_psi ||
@@ -293,6 +295,7 @@ int DavidsonSolver_init(Context& context, DavidsonPlan& davidsonPlan,int num_sta
     davidsonPlan.max_iterations = max_iterations;
     davidsonPlan.residual_tol = residual_tol;
     davidsonPlan.nextra_retain = nextra_retain;
+    davidsonPlan.direction_tolerance = direction_tolerance;
     davidsonPlan.status = kSuccess;
     return kSuccess;
 }
@@ -565,7 +568,7 @@ int ExtendSubspace(
             return kDavidsonCublasError;
         if (!std::isfinite(norm_new)) return kDavidsonNonFinite;
         // extend d_W
-        if (norm_new > davidsonPlan.tNorm_tol*norm_old){
+        if (norm_new > davidsonPlan.direction_tolerance*norm_old){
             const double scale = 1.0 / norm_new;
             if (!CHECK_CUBLAS(cublasDscal(
                 context.cublas,
@@ -708,8 +711,8 @@ int DavidsonSolver(
     if (d_veff == nullptr || davidsonPlan.npoints == 0 || davidsonPlan.npoints > INT_MAX ||
         davidsonPlan.nstates <= 0 || davidsonPlan.max_iterations <= 0 ||
         !std::isfinite(davidsonPlan.residual_tol) || davidsonPlan.residual_tol <= 0 ||
-        !std::isfinite(davidsonPlan.tNorm_tol) || davidsonPlan.tNorm_tol <= 0 ||
-        davidsonPlan.tNorm_tol >= 1 || davidsonPlan.nextra_retain < 0 ||
+        !std::isfinite(davidsonPlan.direction_tolerance) || davidsonPlan.direction_tolerance <= 0 ||
+        davidsonPlan.direction_tolerance >= 1 || davidsonPlan.nextra_retain < 0 ||
         davidsonPlan.max_subspace_dim <= davidsonPlan.nstates ||
         size_t(davidsonPlan.max_subspace_dim) > davidsonPlan.npoints ||
         davidsonPlan.nextra_retain >= davidsonPlan.max_subspace_dim - davidsonPlan.nstates)
@@ -752,6 +755,7 @@ int DavidsonSolver(
             if (ierr != kSuccess) return fail(ierr, "write_log", iter+1);
             return report_davidson_status(kSuccess, "DavidsonSolver", iter+1);
         }
+        if (iter+1 == davidsonPlan.max_iterations) break;
         ierr = UpdateSubspace(context,davidsonPlan);
         if (ierr != kSuccess) return fail(ierr, "UpdateSubspace", iter+1);
         ierr = ExtendSubspace(context,davidsonPlan,nactive,nadded);
@@ -759,6 +763,9 @@ int DavidsonSolver(
         if (nadded == 0)
             return report_davidson_status(kDavidsonStagnation, "DavidsonSolver", iter+1);
     }
+    ierr = write_log(context, davidsonPlan, davidsonPlan.max_iterations, nactive,
+                     h_residual_norms);
+    if (ierr != kSuccess) return fail(ierr, "write_log", davidsonPlan.max_iterations);
     return report_davidson_status(kDavidsonMaxIterations, "DavidsonSolver",
                                    davidsonPlan.max_iterations);
 }

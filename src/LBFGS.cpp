@@ -163,11 +163,11 @@ int destory_LBFGSOptimizer(LBFGSState& lbfgs) {
     if (result == kSuccess) lbfgs = LBFGSState{};
     return report_lbfgs_status(result, "destory_LBFGSOptimizer", lbfgs);
 }
-int LBFGSOptimizer_init(Context& context,LBFGSState& lbfgs,int n, 
+int LBFGSOptimizer_init(Context& context,LBFGSState& lbfgs,int n, double c1, double c2, int max_linesearch_step,
     int history_capacity, calculate_F evaluate, void* user_data, double* d_x_guess,double g_tol){
 
-    if (n <= 0 || history_capacity <= 0 || evaluate == nullptr ||
-        d_x_guess == nullptr || !valid_parameters(lbfgs))
+    if (n <= 0 || history_capacity <= 0 || evaluate == nullptr || c1 < 0 || c2<0 ||
+        max_linesearch_step<0 || d_x_guess == nullptr || !valid_parameters(lbfgs))
         return report_lbfgs_status(kInvalidArgument, "LBFGSOptimizer_init", lbfgs);
     if (lbfgs.d_x || lbfgs.d_g || lbfgs.d_x_trial || lbfgs.d_g_trial ||
         lbfgs.d_p || lbfgs.d_rho || lbfgs.d_alpha || lbfgs.d_s || lbfgs.d_y)
@@ -191,6 +191,9 @@ int LBFGSOptimizer_init(Context& context,LBFGSState& lbfgs,int n,
     lbfgs.line_search_trials = 0;
     lbfgs.step_size = 0.0;
     lbfgs.g_tol = g_tol;
+    lbfgs.c1 = c1;
+    lbfgs.c2 = c2;
+    lbfgs.max_linesearch_step = max_linesearch_step;
     lbfgs.f = lbfgs.g_norm = std::numeric_limits<double>::quiet_NaN();
     auto fail = [&](int error) {
         report_lbfgs_status(error, "LBFGSOptimizer_init", lbfgs);

@@ -41,7 +41,7 @@ struct DavidsonPlan {
     int nextra_retain = 3;
     double* d_residual = nullptr;  // 残差
     double residual_tol = 1e-8;  // 本征残差范数的收敛阈值
-    double tNorm_tol = 1e-8;
+    double direction_tolerance = 1e-8;
 
     int nx{};
     int ny{};
@@ -67,10 +67,11 @@ struct DavidsonPlan {
 // 数组由 DavidsonSolver_init 分配、reset_DavidsonSolver 释放。
 // 返回值为通用 Status 或 DavidsonStatus；求解函数仅在全部目标态收敛时返回 0。
 // 出错时输出状态说明；库调用错误另外输出原生状态、调用表达式和位置。
-// 收敛后向 stderr 输出迭代汇总及各目标态的 Ritz 能级、欧氏残差范数和收敛状态。
+// 收敛或达到迭代上限时向 stderr 输出迭代汇总、Ritz 能级、欧氏残差范数和收敛状态。
+// 达到上限仍返回 kDavidsonMaxIterations，并在状态行输出 Warning 提示。
 // 计算阶段失败后，先 reset 再初始化；停滞或达到迭代上限时计划仍可使用。
 int DavidsonSolver_init(Context& context, DavidsonPlan& davidsonPlan,int num_states,
-            int nx, int ny, int nz, int nextra_retain,
+            int nx, int ny, int nz, int nextra_retain, double direction_tolerance,
             int max_subspace_dim,int max_iterations,double residual_tol) noexcept;
 int reset_DavidsonSolver(DavidsonPlan& davidsonPlan);
 int DavidsonSolver(const Context& context, const finitePlan& finite,

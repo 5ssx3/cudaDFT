@@ -126,22 +126,20 @@ int complex_fft_inverse(const Context& context, const Fft3dPlan& fft,
 int real_fft_inverse(const Context& context, const Fft3dPlan& fft,
                      cuDoubleComplex* d_psi_fft, double* d_psi) noexcept;
 
-// Product integrals.
+// Product integrals. Inputs are device arrays; the scalar result is returned on
+// the host after context.stream completes. On failure, h_result is unchanged.
 int RealReal_IntegralFGdV(const Context& context, const double* d_F,
                          const double* d_G, double dv,
-                         int npoints, double* d_result) noexcept;
+                         int npoints, double& h_result) noexcept;
 
 int ComplexReal_IntegralFGdV(const Context& context, const cuDoubleComplex* d_F,
                             const double* d_G, double dv,
-                            int npoints, cuDoubleComplex* d_result) noexcept;
+                            int npoints, cuDoubleComplex& h_result) noexcept;
 
 // This is integral(conj(F) * G) dV,
 int ComplexComplex_IntegralFGdV(const Context& context, const cuDoubleComplex* d_F,
                                const cuDoubleComplex* d_G, double dv,
-                               int npoints, cuDoubleComplex* d_result) noexcept;
-int RealReal_IntegralFGdV(const Context& context, const double* d_F,
-                               const double* d_G, double dv,
-                               int npoints, double* d_result) noexcept;
+                               int npoints, cuDoubleComplex& h_result) noexcept;
 int RealArrayMulRealArray(const Context& context, double* d_F,
                                double* d_G, int npoints) noexcept;
 // FFT derivatives.
@@ -205,6 +203,8 @@ int apply_gradient_finite(const Context& context, const finitePlan& finite,
 // Invalid arrays/grid/spacing/stencil return kInvalidArgument; an unready plan
 // returns kInvalidState, excessive grid size kSizeOverflow, and launch failures
 // kCudaLaunchError.
+int real_calrho(Context& context, double* d_occ, double* d_psi, 
+            int npoints, int nstates, double dV, double* d_rho) noexcept;
 int apply_HamiltonOperator(const Context& context, const finitePlan& finite,
                     const double* d_psi, const double* d_veff, double* d_Hpsi) noexcept;
 
@@ -231,5 +231,8 @@ int update_r(Context& context,
     const double* b,
     const double* rho) noexcept;
 
-int RealArrayMulReal(Context& context, int n, double* d_RealArray, double a) noexcept;
-int RealArrayPlusRealArray(Context& context, int n, double* d_RealArray1, double* d_RealArray2) noexcept;
+int RealArrayMulReal(const Context& context, int n, double* d_RealArray, double a) noexcept;
+int finite_regularization(const Context& context, finitePlan& finite,
+            const double* d_v, double dV, double eta, double& h_result) noexcept;
+int finite_regularization_contributeTograd(const Context& context,finitePlan& finite,
+                    const double* d_v,double eta, double dV, double* d_reg_lap) noexcept;

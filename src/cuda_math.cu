@@ -272,7 +272,18 @@ __global__ void ComplexReal_FGdv_kernel(const cuDoubleComplex* F, const double* 
     if (i>= nponts) return;
     result[i] = ComplexMulReal(ComplexMulReal(F[i],G[i]), dv);
 }
-
+///////////////////////////////////////////////////////////////////////////////////////////
+__global__ void real_calrho_kernel(double* d_occ, double* d_psi, int npoints, int nstates, double dV, double* d_rho){
+    // |psi|^2 = 1
+    const size_t i = static_cast<size_t>(blockIdx.x)*blockDim.x+threadIdx.x;
+    if(i>= npoints) return;
+    double rhoi = 0;
+    for(int j=0;j<nstates;j++){
+        int idx = i+j*npoints;
+        rhoi = rhoi + d_occ[j]*d_psi[idx]*d_psi[idx];
+    }
+    d_rho[i] = rhoi/dV;
+}
 ///////////////////////////////////////////////////////////////////////////////////////////
 __global__ void laplacian_fft_kernel(const double* d_lapG2, const cuDoubleComplex* psi_fft,
                                      const int npoints, cuDoubleComplex* laplacian_psi_fft) {
@@ -423,13 +434,15 @@ int real_fft_inverse(const Context& context, const Fft3dPlan& fft,
 // storage as a real array. Both components of a complex integral are retained.
 template <typename T>
 int sum_integral(const Context& context, const T* d_products,
-                 int npoints, T* d_result) noexcept {
+                 int npoints, T& h_result) noexcept {
     int blocks = 0;
     const int status = grid_blocks(npoints, blocks);
     if (status != kSuccess) return status;
     T* d_partial = nullptr;
-    if (cudaMalloc(reinterpret_cast<void**>(&d_partial), sizeof(T) * blocks) != cudaSuccess)
+    if (d_products == nullptr) return kInvalidArgument;
+    if (cudaMalloc(reinterpret_cast<void**>(&d_partial), sizeof(T) * (blocks + 1)) != cudaSuccess)
         return kAllocationError;
+    T* d_result = d_partial + blocks;
     auto finish = [&](int code) noexcept {
         const cudaError_t error = cudaFree(d_partial);
         return code == kSuccess && error != cudaSuccess ? kCudaFreeError : code;
@@ -438,15 +451,22 @@ int sum_integral(const Context& context, const T* d_products,
     if (cudaGetLastError() != cudaSuccess) return finish(kCudaLaunchError);
     all_thread_sum<<<1, 256, 0, context.stream>>>(d_partial, blocks, d_result);
     if (cudaGetLastError() != cudaSuccess) return finish(kCudaLaunchError);
-    if (cudaStreamSynchronize(context.stream) != cudaSuccess) return finish(kCudaSyncError);
-    return finish(kSuccess);
+    T result{};
+    const cudaError_t copy = cudaMemcpyAsync(&result, d_result, sizeof(T),
+                                            cudaMemcpyDeviceToHost, context.stream);
+    const cudaError_t sync = cudaStreamSynchronize(context.stream);
+    if (copy != cudaSuccess) return finish(kCudaMemcpyError);
+    if (sync != cudaSuccess) return finish(kCudaSyncError);
+    const int cleanup = finish(kSuccess);
+    if (cleanup == kSuccess) h_result = result;
+    return cleanup;
 }
 
 int RealReal_IntegralFGdV(const Context& context, const double* d_F,
                          const double* d_G, double dv,
-                         int npoints, double* d_result) noexcept {
+                         int npoints, double& h_result) noexcept {
     if (d_F == nullptr || d_G == nullptr ||
-        d_result == nullptr || npoints <= 0 || !std::isfinite(dv))
+        npoints <= 0 || !std::isfinite(dv))
         return kInvalidArgument;
     double* d_products = nullptr;
     if (cudaMalloc(reinterpret_cast<void**>(&d_products),
@@ -455,16 +475,20 @@ int RealReal_IntegralFGdV(const Context& context, const double* d_F,
     int blocks = 0;
     grid_blocks(npoints, blocks);
     RealReal_FGdv_kernel<<<blocks, 256, 0, context.stream>>>(d_F, d_G, dv, npoints, d_products);
+    double result{};
     const int status = cudaGetLastError() == cudaSuccess
-        ? sum_integral(context, d_products, npoints, d_result) : kCudaLaunchError;
+        ? sum_integral(context, d_products, npoints, result) : kCudaLaunchError;
     const cudaError_t error = cudaFree(d_products);
-    return status == kSuccess && error != cudaSuccess ? kCudaFreeError : status;
+    if (status != kSuccess) return status;
+    if (error != cudaSuccess) return kCudaFreeError;
+    h_result = result;
+    return kSuccess;
 }
 int ComplexReal_IntegralFGdV(const Context& context, const cuDoubleComplex* d_F,
                             const double* d_G, double dv,
-                            int npoints, cuDoubleComplex* d_result) noexcept {
+                            int npoints, cuDoubleComplex& h_result) noexcept {
     if (d_F == nullptr || d_G == nullptr ||
-        d_result == nullptr || npoints <= 0 || !std::isfinite(dv))
+        npoints <= 0 || !std::isfinite(dv))
         return kInvalidArgument;
     cuDoubleComplex* d_products = nullptr;
     if (cudaMalloc(reinterpret_cast<void**>(&d_products),
@@ -473,17 +497,21 @@ int ComplexReal_IntegralFGdV(const Context& context, const cuDoubleComplex* d_F,
     int blocks = 0;
     grid_blocks(npoints, blocks);
     ComplexReal_FGdv_kernel<<<blocks, 256, 0, context.stream>>>(d_F, d_G, dv, npoints, d_products);
+    cuDoubleComplex result{};
     const int status = cudaGetLastError() == cudaSuccess
-        ? sum_integral(context, d_products, npoints, d_result) : kCudaLaunchError;
+        ? sum_integral(context, d_products, npoints, result) : kCudaLaunchError;
     const cudaError_t error = cudaFree(d_products);
-    return status == kSuccess && error != cudaSuccess ? kCudaFreeError : status;
+    if (status != kSuccess) return status;
+    if (error != cudaSuccess) return kCudaFreeError;
+    h_result = result;
+    return kSuccess;
 }
 // This is integral(conj(F) * G) dV
 int ComplexComplex_IntegralFGdV(const Context& context, const cuDoubleComplex* d_F,
                                const cuDoubleComplex* d_G, double dv,
-                               int npoints, cuDoubleComplex* d_result) noexcept {
+                               int npoints, cuDoubleComplex& h_result) noexcept {
     if (d_F == nullptr || d_G == nullptr ||
-        d_result == nullptr || npoints <= 0 || !std::isfinite(dv))
+        npoints <= 0 || !std::isfinite(dv))
         return kInvalidArgument;
     cuDoubleComplex* d_products = nullptr;
     if (cudaMalloc(reinterpret_cast<void**>(&d_products),
@@ -492,29 +520,15 @@ int ComplexComplex_IntegralFGdV(const Context& context, const cuDoubleComplex* d
     int blocks = 0;
     grid_blocks(npoints, blocks);
     ComplexComplex_FGdv_kernel<<<blocks, 256, 0, context.stream>>>(d_F, d_G, dv, npoints, d_products);
+    cuDoubleComplex result{};
     const int status = cudaGetLastError() == cudaSuccess
-        ? sum_integral(context, d_products, npoints, d_result) : kCudaLaunchError;
+        ? sum_integral(context, d_products, npoints, result) : kCudaLaunchError;
     const cudaError_t error = cudaFree(d_products);
-    return status == kSuccess && error != cudaSuccess ? kCudaFreeError : status;
+    if (status != kSuccess) return status;
+    if (error != cudaSuccess) return kCudaFreeError;
+    h_result = result;
+    return kSuccess;
 }
-// int RealReal_IntegralFGdV(const Context& context, const double* d_F,
-//                                const double* d_G, double dv,
-//                                int npoints, double* d_result) noexcept {
-//     if (d_F == nullptr || d_G == nullptr ||
-//         d_result == nullptr || npoints <= 0 || !std::isfinite(dv))
-//         return kInvalidArgument;
-//     double* d_products = nullptr;
-//     if (cudaMalloc(reinterpret_cast<void**>(&d_products),
-//                    sizeof(double) * static_cast<std::size_t>(npoints)) != cudaSuccess)
-//         return kAllocationError;
-//     int blocks = 0;
-//     grid_blocks(npoints, blocks);
-//     RealReal_FGdv_kernel<<<blocks, 256, 0, context.stream>>>(d_F, d_G, dv, npoints, d_products);
-//     const int status = cudaGetLastError() == cudaSuccess
-//         ? sum_integral(context, d_products, npoints, d_result) : kCudaLaunchError;
-//     const cudaError_t error = cudaFree(d_products);
-//     return status == kSuccess && error != cudaSuccess ? kCudaFreeError : status;
-// }
 int RealArrayMulRealArray(const Context& context, double* d_F,
                                double* d_G, int npoints) noexcept {
     int blocks = 0;
@@ -522,7 +536,7 @@ int RealArrayMulRealArray(const Context& context, double* d_F,
     RealArrayMulRealArray_kernel<<<blocks, 256, 0, context.stream>>>(npoints,d_F,d_G);
     return 0;
 }
-//
+///////////////////////////////////////////////////////////////////////////////////////////
 int complex_gradient(const Context& context, const Fft3dPlan& fft, cuDoubleComplex* d_psi,
                      cuDoubleComplex* d_grad_psi_x, cuDoubleComplex* d_grad_psi_y,
                      cuDoubleComplex* d_grad_psi_z) noexcept {
@@ -779,209 +793,6 @@ int creat_fftPlan(Context& context, Fft3dPlan*& fft_out,
 }
 /////////////////////////////////////////////////////////////////////////////
 // Finite difference
-int creat_finitePlan(finitePlan& finite, int nx, int ny, int nz, int half_width,
-                     double hx, double hy, double hz){
-    if (half_width<1) return 1;
-    if (hx<=0 || hy<=0 || hz<=0) return 2;
-    if (nx<=0 || ny<=0 || nz<=0) return 3;
-    if (half_width>nx || half_width>ny || half_width>nz) return 4;
-    if (finite.d_coeff != nullptr) return 5;
-    //
-    double* h_coeff = new double[half_width+1]{};
-    double ratio = 1.0;
-
-    for (int k = 1; k <=half_width ; ++k) {
-        ratio *= double(half_width - k + 1) / (double(half_width) + k);
-        double value = 2.0 * ratio / (double(k) * double(k));
-        if (k % 2 == 0) value = -value;
-        h_coeff[k] = value;
-        h_coeff[0] -= 2.0 * value;
-    }
-    double* d_coeff = nullptr;
-    size_t bytes = (size_t(half_width)+1)*sizeof(double);
-    cudaError_t status = cudaMalloc(reinterpret_cast<void**>(&d_coeff), bytes);
-    if (status != cudaSuccess) return 6;
-    status = cudaMemcpy(d_coeff,h_coeff,bytes,cudaMemcpyHostToDevice);
-    int g = half_width;
-    int Nx = nx+2*g;
-    int Ny = ny+2*g;
-    int Nz = nz+2*g;
-    // double* d_halo_work = nullptr;
-    // bytes = (size_t(Nx*Ny*Nz))*sizeof(double);
-    // cudaError_t status = cudaMalloc(reinterpret_cast<void**>(&d_halo_work), bytes);
-    // if (status != cudaSuccess) return 7;
-    //
-    finite.nx = nx;
-    finite.ny = ny;
-    finite.nz = nz;
-    finite.npoints = nx*ny*nz;
-    finite.half_width = half_width;
-    finite.gap.x = hx;
-    finite.gap.y = hy;
-    finite.gap.z = hz;
-    finite.d_coeff = d_coeff;
-    // finite->d_halo_work = d_halo_work;
-    finite.status = 0;
-    //
-    delete[] h_coeff;
-    return 0;
-}
-int CUDA_init(Context& context) noexcept {
-    // 拒绝覆盖已有资源。
-    if (context.stream || context.cublas ||
-        context.cusolver || context.fft)
-        return kInvalidState;
-
-    int count = 0;
-    if (cudaGetDeviceCount(&count) != cudaSuccess || count == 0)
-        return kCudaInitError;
-    constexpr int device_id = 0;
-
-    if (cudaSetDevice(device_id) != cudaSuccess)
-        return kCudaInitError;
-
-    // 所有步骤成功后，再交给调用者。
-    Context next{};
-    next.device_id = device_id;
-    next.device_count = count;
-
-    auto fail = [&](int error) noexcept {
-        if (next.cusolver)
-            cusolverDnDestroy(next.cusolver);
-        if (next.cublas)
-            cublasDestroy(next.cublas);
-        if (next.stream)
-            cudaStreamDestroy(next.stream);
-        return error;
-    };
-
-    if (cudaGetDeviceProperties(&next.device_properties, device_id) != cudaSuccess ||
-        cudaDriverGetVersion(&next.driver_version) != cudaSuccess ||
-        cudaRuntimeGetVersion(&next.runtime_version) != cudaSuccess)
-        return fail(kCudaInitError);
-
-    if (cudaStreamCreateWithFlags(
-            &next.stream, cudaStreamNonBlocking) != cudaSuccess)
-        return fail(kCudaInitError);
-
-    if (cublasCreate(&next.cublas) != CUBLAS_STATUS_SUCCESS)
-        return fail(kCublasError);
-
-    if (cublasSetStream(next.cublas, next.stream)
-            != CUBLAS_STATUS_SUCCESS)
-        return fail(kCublasError);
-
-    if (cublasSetPointerMode(
-            next.cublas, CUBLAS_POINTER_MODE_HOST)
-            != CUBLAS_STATUS_SUCCESS)
-        return fail(kCublasError);
-
-    if (cusolverDnCreate(&next.cusolver)
-            != CUSOLVER_STATUS_SUCCESS)
-        return fail(kCusolverError);
-
-    if (cusolverDnSetStream(next.cusolver, next.stream)
-            != CUSOLVER_STATUS_SUCCESS)
-        return fail(kCusolverError);
-
-    if (cudaMemGetInfo(&next.free_memory_bytes, &next.total_memory_bytes) != cudaSuccess)
-        return fail(kCudaInitError);
-
-    next.status = kSuccess;
-    context = next;
-    return kSuccess;
-}
-// __global__ void halo_fill_kernel(const finitePlan finite, double* d_input,double* d_output) {
-//     if (d_input == nullptr || d_output == nullptr) return;
-//     const int i = blockIdx.x * blockDim.x + threadIdx.x;
-//     int nx = finite.nx;
-//     int ny = finite.ny;
-//     int nz = finite.nz;
-//     int g = finite.half_width;
-//     int Nx = nx+2*g;
-//     int Ny = ny+2*g;
-//     int Nz = nz+2*g;
-//     if (i>= Nx*Ny*Nz) return;
-//     int Ix = i%Nx;
-//     int Iy = (i/Nx)%Ny;
-//     int Iz = (i/(Nx*Ny))%Nz;
-//     int ix = Ix - g;
-//     int iy = Iy - g;
-//     int iz = Iz - g;
-//     int parity = 1;
-
-//     if (ix ==0 || iy==0 || Iz==0 || ix==nx+1 || iy==ny+1 || iz==nz+1){
-//         d_output[i]=0;
-//         return;
-//     }
-//     if (ix < 0) {
-//         ix = -ix;
-//         parity = -parity;
-//     } else if (ix > nx + 1) {
-//         ix = 2 * (nx + 1) - ix;
-//         parity = -parity;
-//     }
-//     if (iy < 0) {
-//         iy = -iy;
-//         parity = -parity;
-//     } else if (iy > ny + 1) {
-//         iy = 2 * (ny + 1) - iy;
-//         parity = -parity;
-//     }
-//     if (iz < 0) {
-//         iz = -iz;
-//         parity = -parity;
-//     } else if (iz > nz + 1) {
-//         iz = 2 * (nz + 1) - iz;
-//         parity = -parity;
-//     }
-//     const size_t source = (size_t(iz - 1) * ny + (iy - 1)) * nx + (ix - 1);
-
-//     d_output[i] = double(parity) * d_input[source];
-// }
-// __global__ void finite_laplacian_kernel(const finitePlan finite, double* d_halo_input,double* d_output){
-//     if (d_halo_input == nullptr || d_output == nullptr) return;
-//     const int i = blockIdx.x * blockDim.x + threadIdx.x;
-//     int nx = finite.nx;
-//     int ny = finite.ny;
-//     int nz = finite.nz;
-//     int g = finite.half_width;
-//     int Nx = nx+2*g;
-//     int Ny = ny+2*g;
-//     int Nz = nz+2*g;
-//     if (i>= nx*ny*nz) return;
-//     int ix = i%nx;
-//     int iy = (i/nx)%ny;
-//     int iz = (i/(nx*ny))%nz;
-//     int Ix = ix+g;
-//     int Iy = iy+g;
-//     int Iz = iz+g;
-//     // 当前内部点在扩展数组中的地址。
-//     const size_t stride_y = Nx;
-//     const size_t stride_z = Nx * Ny;
-//     const size_t center =
-//         (size_t(iz) + g) * stride_z +
-//         (size_t(iy) + g) * stride_y +
-//         (size_t(ix) + g);
-//     const double inv_hx2 = 1.0 / (finite.gap.x * finite.gap.x);
-//     const double inv_hy2 = 1.0 / (finite.gap.y * finite.gap.y);
-//     const double inv_hz2 = 1.0 / (finite.gap.z * finite.gap.z);
-//     double lap = finite.d_coeff[0] * d_halo_input[center] * (inv_hx2 + inv_hy2 + inv_hz2);
-//     for (int r = 1; r <= g; ++r) {
-//         const size_t dx = size_t(r);
-//         const size_t dy = size_t(r) * stride_y;
-//         const size_t dz = size_t(r) * stride_z;
-//         lap += finite.d_coeff[r] * (
-//             (d_halo_input[center - dx] +
-//              d_halo_input[center + dx]) * inv_hx2 +
-//             (d_halo_input[center - dy] +
-//              d_halo_input[center + dy]) * inv_hy2 +
-//             (d_halo_input[center - dz] +
-//              d_halo_input[center + dz]) * inv_hz2);
-//     }
-//     d_output[i] = lap;
-// }
-//
 __device__ __forceinline__
 double read_odd_axis(
     const double* input,
@@ -1143,6 +954,116 @@ __global__ void finite_gradient_kernel(
     d_gy[i] = gy / gap.y;
     d_gz[i] = gz / gap.z;
 }
+int creat_finitePlan(finitePlan& finite, int nx, int ny, int nz, int half_width,
+                     double hx, double hy, double hz){
+    if (half_width<1) return 1;
+    if (hx<=0 || hy<=0 || hz<=0) return 2;
+    if (nx<=0 || ny<=0 || nz<=0) return 3;
+    if (half_width>nx || half_width>ny || half_width>nz) return 4;
+    if (finite.d_coeff != nullptr) return 5;
+    //
+    double* h_coeff = new double[half_width+1]{};
+    double ratio = 1.0;
+
+    for (int k = 1; k <=half_width ; ++k) {
+        ratio *= double(half_width - k + 1) / (double(half_width) + k);
+        double value = 2.0 * ratio / (double(k) * double(k));
+        if (k % 2 == 0) value = -value;
+        h_coeff[k] = value;
+        h_coeff[0] -= 2.0 * value;
+    }
+    double* d_coeff = nullptr;
+    size_t bytes = (size_t(half_width)+1)*sizeof(double);
+    cudaError_t status = cudaMalloc(reinterpret_cast<void**>(&d_coeff), bytes);
+    if (status != cudaSuccess) return 6;
+    status = cudaMemcpy(d_coeff,h_coeff,bytes,cudaMemcpyHostToDevice);
+    if (status != cudaSuccess) return 7;
+    // double* d_halo_work = nullptr;
+    // bytes = (size_t(Nx*Ny*Nz))*sizeof(double);
+    // cudaError_t status = cudaMalloc(reinterpret_cast<void**>(&d_halo_work), bytes);
+    // if (status != cudaSuccess) return 7;
+    //
+    finite.nx = nx;
+    finite.ny = ny;
+    finite.nz = nz;
+    finite.npoints = nx*ny*nz;
+    finite.half_width = half_width;
+    finite.gap.x = hx;
+    finite.gap.y = hy;
+    finite.gap.z = hz;
+    finite.d_coeff = d_coeff;
+    // finite->d_halo_work = d_halo_work;
+    finite.status = 0;
+    //
+    delete[] h_coeff;
+    return 0;
+}
+int CUDA_init(Context& context) noexcept {
+    // 拒绝覆盖已有资源。
+    if (context.stream || context.cublas ||
+        context.cusolver || context.fft)
+        return kInvalidState;
+
+    int count = 0;
+    if (cudaGetDeviceCount(&count) != cudaSuccess || count == 0)
+        return kCudaInitError;
+    constexpr int device_id = 0;
+
+    if (cudaSetDevice(device_id) != cudaSuccess)
+        return kCudaInitError;
+
+    // 所有步骤成功后，再交给调用者。
+    Context next{};
+    next.device_id = device_id;
+    next.device_count = count;
+
+    auto fail = [&](int error) noexcept {
+        if (next.cusolver)
+            cusolverDnDestroy(next.cusolver);
+        if (next.cublas)
+            cublasDestroy(next.cublas);
+        if (next.stream)
+            cudaStreamDestroy(next.stream);
+        return error;
+    };
+
+    if (cudaGetDeviceProperties(&next.device_properties, device_id) != cudaSuccess ||
+        cudaDriverGetVersion(&next.driver_version) != cudaSuccess ||
+        cudaRuntimeGetVersion(&next.runtime_version) != cudaSuccess)
+        return fail(kCudaInitError);
+
+    if (cudaStreamCreateWithFlags(
+            &next.stream, cudaStreamNonBlocking) != cudaSuccess)
+        return fail(kCudaInitError);
+
+    if (cublasCreate(&next.cublas) != CUBLAS_STATUS_SUCCESS)
+        return fail(kCublasError);
+
+    if (cublasSetStream(next.cublas, next.stream)
+            != CUBLAS_STATUS_SUCCESS)
+        return fail(kCublasError);
+
+    if (cublasSetPointerMode(
+            next.cublas, CUBLAS_POINTER_MODE_HOST)
+            != CUBLAS_STATUS_SUCCESS)
+        return fail(kCublasError);
+
+    if (cusolverDnCreate(&next.cusolver)
+            != CUSOLVER_STATUS_SUCCESS)
+        return fail(kCusolverError);
+
+    if (cusolverDnSetStream(next.cusolver, next.stream)
+            != CUSOLVER_STATUS_SUCCESS)
+        return fail(kCusolverError);
+
+    if (cudaMemGetInfo(&next.free_memory_bytes, &next.total_memory_bytes) != cudaSuccess)
+        return fail(kCudaInitError);
+
+    next.status = kSuccess;
+    context = next;
+    return kSuccess;
+}
+
 int apply_laplacian_finite(const Context& context, const finitePlan& finite,
                     const double* d_psi, double* d_lapl_psi) noexcept {
     if (finite.d_coeff == nullptr || d_psi == nullptr || d_lapl_psi == nullptr) return kInvalidArgument;
@@ -1212,6 +1133,105 @@ int apply_gradient_finite(const Context& context, const finitePlan& finite,
     //     double* work, int lwork,
     //     int* devInfo);
 /////////////////////////////////////////////////////////////////////////////////////////////////
+int real_calrho(Context& context, double* d_occ, double* d_psi, int npoints,
+                         int nstates, double dV, double* d_rho) noexcept{
+    int blocks = 0;
+    const int status = grid_blocks(static_cast<int>(npoints), blocks);
+    if (status != kSuccess) return status;
+    real_calrho_kernel<<<blocks,256,0,context.stream>>>(d_occ,d_psi,npoints,nstates,dV,d_rho);
+    return cudaGetLastError() == cudaSuccess ? kSuccess : kCudaLaunchError;
+}
+__global__ void finite_regularization_lap_kernel(const double* d_v,double eta, double dV, const Vector gap,
+                 const double* d_coeff, int nx, int ny, int nz, int half_width, double* d_reg_grad){
+    const size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (i >= size_t(nx) * ny * nz) return;
+    const int ix = int(i % nx);
+    const int iy = int((i / nx) % ny);
+    const int iz = int(i / (size_t(nx) * ny));
+    const size_t sy = size_t(nx);
+    const size_t sz = size_t(nx) * ny;
+    const double inv_hx2 =
+        1.0 / (gap.x * gap.x);
+    const double inv_hy2 =
+        1.0 / (gap.y * gap.y);
+    const double inv_hz2 =
+        1.0 / (gap.z * gap.z);
+    double lap = 0.0;
+
+    for (int r = 1; r <= half_width; ++r) {
+        const double c = d_coeff[r];
+        const size_t dx = size_t(r);
+        const size_t dy = size_t(r) * sy;
+        const size_t dz = size_t(r) * sz;
+
+        if (ix >= r)
+            lap += c * (d_v[i - dx] - d_v[i]) * inv_hx2;
+        if (r < nx - ix)
+            lap += c * (d_v[i + dx] - d_v[i]) * inv_hx2;
+
+        if (iy >= r)
+            lap += c * (d_v[i - dy] - d_v[i]) * inv_hy2;
+        if (r < ny - iy)
+            lap += c * (d_v[i + dy] - d_v[i]) * inv_hy2;
+
+        if (iz >= r)
+            lap += c * (d_v[i - dz] - d_v[i]) * inv_hz2;
+        if (r < nz - iz)
+            lap += c * (d_v[i + dz] - d_v[i]) * inv_hz2;
+    }
+    d_reg_grad[i] = -2.0 * eta * dV * lap;
+}
+__global__ void finite_regularization_grad2_kernel(
+    int nx, int ny, int nz, int g, const Vector gap,
+    const double* d_coeff, const double* d_input,
+    double dV, double* d_reg){
+    if (d_input == nullptr ||
+        d_coeff == nullptr)
+        return;
+    const size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (i >= size_t(nx) * ny * nz) return;
+    const int ix = int(i % nx);
+    const int iy = int((i / nx) % ny);
+    const int iz = int(i / (size_t(nx) * ny));
+
+    const size_t sy = size_t(nx);
+    const size_t sz = size_t(nx) * ny;
+
+    double delta = 0.0;
+    double reg = 0.0;
+    for (int r = 1; r <= g; ++r) {
+        const size_t dx = size_t(r);
+        const size_t dy = size_t(r) * sy;
+        const size_t dz = size_t(r) * sz;
+        if (ix >= r){
+            delta = d_input[i - dx] - d_input[i];
+            reg += d_coeff[r] * delta * delta / (gap.x * gap.x);
+        }
+        if (r < nx - ix){
+            delta = d_input[i + dx] - d_input[i];
+            reg += d_coeff[r] * delta * delta / (gap.x * gap.x);
+        }
+
+        if (iy >= r){
+            delta = d_input[i - dy] - d_input[i];
+            reg += d_coeff[r] * delta * delta / (gap.y * gap.y);
+        }
+        if (r < ny - iy){
+            delta = d_input[i + dy] - d_input[i];
+            reg += d_coeff[r] * delta * delta / (gap.y * gap.y);
+        }
+
+        if (iz >= r){
+            delta = d_input[i - dz] - d_input[i];
+            reg += d_coeff[r] * delta * delta / (gap.z * gap.z);
+        }
+        if (r < nz - iz){
+            delta = d_input[i + dz] - d_input[i];
+            reg += d_coeff[r] * delta * delta / (gap.z * gap.z);
+        }
+    }
+    d_reg[i] = 0.5 * dV * reg;
+}
 __global__ void finite_Hpsi_kernel(
     int nx, int ny, int nz, int g, const Vector gap,
     const double* d_coeff, const double* d_psi, const double* d_veff,
@@ -1223,8 +1243,7 @@ __global__ void finite_Hpsi_kernel(
         d_coeff == nullptr)
         return;
     const size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
-    if (i >= size_t(nx) * ny * nz)
-        return;
+    if (i >= size_t(nx) * ny * nz) return;
     const int ix = int(i % nx);
     const int iy = int((i / nx) % ny);
     const int iz = int(i / (size_t(nx) * ny));
@@ -1439,7 +1458,7 @@ int update_r(Context& context,
                         n, r, s, a, b, rho);
     return kSuccess;
 }
-int RealArrayMulReal(Context& context, int n, 
+int RealArrayMulReal(const Context& context, int n, 
                      double* d_RealArray, double a) noexcept
 {
     int blocks = 0;
@@ -1454,4 +1473,32 @@ int RealArrayPlusRealArray(Context& context, int n,
     grid_blocks(n,blocks);
     RealArrayPlusRealArray_kernel<<<blocks,256,0,context.stream>>>(n,d_RealArray1,d_RealArray2);
     return kSuccess;
+}
+// iks_Ws
+int finite_regularization(const Context& context, finitePlan& finite,
+            const double* d_v, double dV, double eta, double& h_result) noexcept{
+    int blocks = 0;
+    size_t n = finite.npoints;
+    grid_blocks(n,blocks);
+    double* d_reg_grad2 = nullptr;
+    cudaMalloc(reinterpret_cast<void**>(&d_reg_grad2),n*sizeof(double));
+    finite_regularization_grad2_kernel<<<blocks,256,0,context.stream>>>(
+        finite.nx,finite.ny,finite.nz,finite.half_width,finite.gap,finite.d_coeff,d_v,dV,d_reg_grad2);
+    if(cudaGetLastError() != cudaSuccess ) return kCudaLaunchError;
+    const int status = cudaGetLastError() == cudaSuccess
+        ? sum_integral(context, d_reg_grad2, n, h_result) : kCudaLaunchError;
+    if (status != kSuccess) return status;
+    h_result = eta * h_result;
+    const cudaError_t cleanup = cudaFree(d_reg_grad2);
+    if (cleanup != cudaSuccess) return kCudaFreeError;
+    return kSuccess;
+}
+int finite_regularization_contributeTograd(const Context& context,finitePlan& finite,
+                    const double* d_v,double eta, double dV, double* d_reg_lap) noexcept{
+    int blocks = 0;
+    size_t n = finite.npoints;
+    grid_blocks(n,blocks);
+    finite_regularization_lap_kernel<<<blocks,256,0,context.stream>>>(
+        d_v,eta,dV, finite.gap,finite.d_coeff,finite.nx,finite.ny,finite.nz,finite.half_width,d_reg_lap);
+    return cudaGetLastError() == cudaSuccess ? kSuccess : kCudaLaunchError;
 }

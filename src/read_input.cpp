@@ -104,7 +104,7 @@ int read_parameters(const std::string& filename,
         parsed.system.spin = choice(system, "spin", "system", "unpolarized");
 
         const auto domain = root["domain"];
-        check_mapping(domain, "domain", {"padding", "orbital_boundary", "hartree_boundary", "multipole_order"});
+        check_mapping(domain, "domain", {"padding", "orbital_boundary"});
         const auto padding = domain["padding"];
         require(padding.IsDefined() && padding.IsSequence() && padding.size() == 3, "domain.padding",
                 "expected exactly three nonnegative numbers");
@@ -120,15 +120,10 @@ int read_parameters(const std::string& filename,
             parsed.domain.padding[axis] = length;
         }
         parsed.domain.orbital_boundary = choice(domain, "orbital_boundary", "domain", "dirichlet_zero");
-        if (domain["hartree_boundary"].IsDefined() || domain["multipole_order"].IsDefined()) {
-            parsed.domain.hartree_boundary = choice(domain, "hartree_boundary", "domain", "multipole");
-            parsed.domain.multipole_order = integer(domain, "multipole_order", "domain", 0);
-        }
-
         const auto mesh = root["mesh"];
-        check_mapping(mesh, "mesh", {"type", "stencil_half_width", "rgrids"});
+        check_mapping(mesh, "mesh", {"type", "finite_half_width", "rgrids"});
         parsed.mesh.type = choice(mesh, "type", "mesh", "uniform");
-        parsed.mesh.finite_difference_halfwidth = integer(mesh, "stencil_half_width", "mesh", 1);
+        parsed.mesh.finite_difference_halfwidth = integer(mesh, "finite_half_width", "mesh", 1);
         std::istringstream grid_text(value<std::string>(mesh, "rgrids", "mesh"));
         int npoints = 1;
         for (int& dimension : parsed.mesh.rgrids) {
@@ -141,36 +136,37 @@ int read_parameters(const std::string& filename,
         grid_text >> std::ws;
         require(grid_text.eof(), "mesh.rgrids", "expected exactly three positive integers");
         require(parsed.mesh.finite_difference_halfwidth <= *std::min_element(parsed.mesh.rgrids.begin(), parsed.mesh.rgrids.end()),
-                "mesh.stencil_half_width", "half width exceeds grid dimensions");
+                "mesh.finite_half_width", "half width exceeds grid dimensions");
 
         const auto inversion = root["inversion"];
-        check_mapping(inversion, "inversion", {"hartree_density", "initial_potential", "eigensolver",
-                      "occupations", "optimizer", "objective", "convergence"});
-        parsed.inversion.hartree_density = choice(inversion, "hartree_density", "inversion", "target");
+        check_mapping(inversion, "inversion", {"initial_potential", "regularization_eta", "extra_states",
+                      "eigensolver", "occupations", "optimizer", "convergence"});
         parsed.inversion.initial_potential = choice(inversion, "initial_potential", "inversion", "zero");
+        parsed.inversion.regularization_eta = number(inversion, "regularization_eta", "inversion", false);
+        parsed.inversion.extra_states = integer(inversion, "extra_states", "inversion", 0);
 
         const auto eigensolver = inversion["eigensolver"];
         const std::string eig_path = "inversion.eigensolver";
-        check_mapping(eigensolver, eig_path, {"method", "residual_tolerance", "extra_states", "max_subspace_dim",
+        check_mapping(eigensolver, eig_path, {"method", "residual_tolerance", "max_subspace_dim",
                       "max_iterations", "nextra_retain", "direction_tolerance"});
         auto& eig = parsed.inversion.eigensolver;
         eig.method = choice(eigensolver, "method", eig_path, "davidson");
         eig.residual_tolerance = number(eigensolver, "residual_tolerance", eig_path, true);
-        eig.extra_states = integer(eigensolver, "extra_states", eig_path, 0);
         eig.max_subspace_dim = integer(eigensolver, "max_subspace_dim", eig_path, 1);
         eig.max_iterations = integer(eigensolver, "max_iterations", eig_path, 1);
         eig.nextra_retain = integer(eigensolver, "nextra_retain", eig_path, 0);
         eig.direction_tolerance = number(eigensolver, "direction_tolerance", eig_path, true);
         require(eig.direction_tolerance < 1, eig_path + ".direction_tolerance", "must be < 1");
         // 至少有一个占据态；实际 nstates = Ne/2 + extra_states 需在读取分子后确定。
-        require(eig.max_subspace_dim <= npoints && eig.extra_states < eig.max_subspace_dim - 1,
+        require(eig.max_subspace_dim <= npoints && parsed.inversion.extra_states < eig.max_subspace_dim - 1,
                 eig_path + ".max_subspace_dim", "must exceed extra_states + 1 and be <= grid point count");
-        require(eig.nextra_retain < eig.max_subspace_dim - eig.extra_states - 1,
+        require(eig.nextra_retain < eig.max_subspace_dim - parsed.inversion.extra_states - 1,
                 eig_path + ".nextra_retain", "must leave room to expand beyond the retained states");
 
         const auto occupations = inversion["occupations"];
-        check_mapping(occupations, "inversion.occupations", {"method"});
+        check_mapping(occupations, "inversion.occupations", {"method", "temperature"});
         parsed.inversion.occupations.method = choice(occupations, "method", "inversion.occupations", "fixed");
+        parsed.inversion.occupations.temperature = number(occupations, "temperature", "inversion.occupations", false);
 
         const auto optimizer = inversion["optimizer"];
         const std::string opt_path = "inversion.optimizer";
@@ -185,20 +181,9 @@ int read_parameters(const std::string& filename,
         require(opt.c1 < 1, opt_path + ".c1", "must be < 1");
         require(opt.c1 < opt.c2 && opt.c2 < 1, opt_path + ".c2", "must satisfy c1 < c2 < 1");
 
-        const auto objective = inversion["objective"];
-        check_mapping(objective, "inversion.objective", {"density_metric", "regularization"});
-        parsed.inversion.objective.density_metric = choice(objective, "density_metric", "inversion.objective", "relative_l2");
-        const auto regularization = objective["regularization"];
-        const std::string reg_path = "inversion.objective.regularization";
-        check_mapping(regularization, reg_path, {"type", "strength"});
-        auto& reg = parsed.inversion.objective.regularization;
-        reg.type = choice(regularization, "type", reg_path, "gradient_l2");
-        reg.strength = number(regularization, "strength", reg_path, false);
-
         const auto convergence = inversion["convergence"];
-        check_mapping(convergence, "inversion.convergence", {"density_relative_l2", "gradient_tolerance"});
+        check_mapping(convergence, "inversion.convergence", {"gradient_tolerance"});
         auto& conv = parsed.inversion.convergence;
-        conv.density_relative_l2 = number(convergence, "density_relative_l2", "inversion.convergence", true);
         conv.gradient_tolerance = number(convergence, "gradient_tolerance", "inversion.convergence", false);
 
         const auto output = root["output"];

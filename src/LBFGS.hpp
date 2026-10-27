@@ -70,7 +70,7 @@ struct LBFGSState {
 };
 
 int destory_LBFGSOptimizer(LBFGSState& lbfgs);
-int LBFGSOptimizer_init(Context& context,LBFGSState& lbfgs,int n, 
+int LBFGSOptimizer_init(Context& context,LBFGSState& lbfgs,int n, double c1, double c2, int max_linesearch_step,
     int history_capacity, calculate_F evaluate, void* user_data, double* d_x_guess, double g_tol);
 // 每次至多接受一步；返回 0 表示正常结束，kLBFGSConverged 表示达到梯度阈值。
 // 线搜索次数耗尽时保留接受点及历史，步长为 0，输出警告并返回 kLBFGSLineSearchLimitReached，可再次调用。
