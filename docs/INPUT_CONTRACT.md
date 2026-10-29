@@ -294,11 +294,11 @@ J = ½ηn² + (α/2) ∫ |∇vxc|² dr
 | `write_density` | `DENSITY`：最终轨道及固定双占据重构的密度，bohr⁻³ |
 | `write_density_difference` | `DENSITY_DIFFERENCE`：nKS−ntarget，bohr⁻³ |
 | `write_wave` | `ORBITAL_0001` 等：全部求解态的带符号实波函数，bohr⁻³ᐟ²，每个轨道归一化为 1 |
-| `write_eigenvalues` | 可选，默认 false；`EIGENVALUES`：全部求解态的编号（从 1 开始）及本征能级，Hartree |
+| `write_eigenvalues` | 可选，默认 false；`EIGENVALUES`：全部求解态的编号（从 1 开始）、本征能级（Hartree）及对应的实际占据数；列名为 `state eigenvalue_Ha occupation` |
 
 上述场文件均采用 VASP LOCPOT 文本布局（晶格和原子位置为 Å，x 方向最快，每行最多五个场值），不补边界、不插值。密度仍是 bohr⁻³，不能作为按晶胞体积缩放的 VASP CHGCAR 解读。为精确保留内部节点，文件原点为 `lower+gap`，文件晶胞边长为 `rgrids*gap`，原子坐标减去文件原点；标题记录场单位、原点和实际物理盒上下边界（bohr）。这只是输出采样区域，计算仍采用原来的孤立体系物理边界。
 
-`write_results(context, parameters, grid, lbfgs, davidson, error)` 由外层在最终收敛后调用；调用方须确保 Davidson 输出对应最终接受的 `lbfgs.d_x`，且 `d_psi` 是未经原地平方覆盖的欧氏归一化 Ritz 轨道。写出器以 `2*sum(psi²)/dV` 重构闭壳层密度，以 `psi/sqrt(dV)` 写物理轨道，不修改设备数组。同名文件会覆盖；关闭的输出既不创建也不删除已有文件。失败返回 1 并填写错误信息，可能已产生部分文件。
+`write_results(context, parameters, grid, lbfgs, davidson, occupation, error)` 由外层在最终收敛后调用；调用方须确保 Davidson 输出对应最终接受的 `lbfgs.d_x`，`occupation.d_occupation` 与这些能级一一对应，且 `d_psi` 是未经原地平方覆盖的欧氏归一化 Ritz 轨道。写出器以 `2*sum(psi²)/dV` 重构闭壳层密度，以 `psi/sqrt(dV)` 写物理轨道，不修改设备数组。同名文件会覆盖；关闭的输出既不创建也不删除已有文件。失败返回 1 并填写错误信息，可能已产生部分文件。
 
 不提供检查点或展开配置输出，读取器不再接受 `write_checkpoint`、`write_resolved_input` 或旧的 `write_vxc` 字段。
 

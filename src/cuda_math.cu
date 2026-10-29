@@ -826,6 +826,19 @@ __global__ void finite_gradient_kernel(
     d_gy[i] = gy / gap.y;
     d_gz[i] = gz / gap.z;
 }
+int destory_finitePlan(finitePlan& finite){
+    if (finite.d_coeff != nullptr) {
+        const cudaError_t error = cudaFree(const_cast<double*>(finite.d_coeff));
+        if (error != cudaSuccess) {
+            std::cerr << "[CUDA] cudaFree(finite.d_coeff): "
+                      << cudaGetErrorString(error) << '\n';
+            finite.status = kInvalidState;
+            return kCudaFreeError;
+        }
+    }
+    finite = {};
+    return kSuccess;
+}
 int creat_finitePlan(finitePlan& finite, int nx, int ny, int nz, int half_width,
                      double hx, double hy, double hz){
     if (half_width<1) return 1;

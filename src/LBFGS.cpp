@@ -185,7 +185,6 @@ int LBFGSOptimizer_init(Context& context,LBFGSState& lbfgs,int n, double c1, dou
     lbfgs.history_capacity = history_capacity;
     lbfgs.history_next = 0;
     lbfgs.history_count = 0;
-    lbfgs.max_linesearch_step = 50;
     lbfgs.status = kLBFGSNotInitialized;
     lbfgs.iterations = lbfgs.evaluations = 0;
     lbfgs.line_search_trials = 0;
@@ -430,12 +429,10 @@ int WolfeLineSearch(Context& context, LBFGSState& lbfgs, calculate_F evaluate, v
                 d_p, 1,
                 &dtrial))) return kLBFGSCublasError;
             if (!std::isfinite(dtrial)) return kLBFGSNonFinite;
-            const bool trial_converged = g_trial_norm <= lbfgs.g_tol;
-            if (trial_converged || std::abs(dtrial) <= lbfgs.c2 * std::abs(d0)) {
-                if (!trial_converged) {
-                    const int history_status = UpdataHistory(context, lbfgs);
-                    if (history_status != kSuccess) return history_status;
-                }
+            //
+            if (std::abs(dtrial) <= lbfgs.c2 * std::abs(d0)) {
+                const int history_status = UpdataHistory(context, lbfgs);
+                if (history_status != kSuccess) return history_status;
                 if (!CHECK_CUDA(cudaMemcpyAsync(lbfgs.d_x, d_x_trial,
                         size_t(n) * sizeof(double), cudaMemcpyDeviceToDevice, context.stream)) ||
                     !CHECK_CUDA(cudaMemcpyAsync(lbfgs.d_g, d_g_trial,
@@ -446,7 +443,7 @@ int WolfeLineSearch(Context& context, LBFGSState& lbfgs, calculate_F evaluate, v
                 lbfgs.g_norm = g_trial_norm;
                 lbfgs.step_size = eta;
                 ++lbfgs.iterations;
-                if (trial_converged) return kLBFGSConverged;
+                if (g_trial_norm <= lbfgs.g_tol) return kLBFGSConverged;
                 return kSuccess;
             }
             if(dtrial>0) 

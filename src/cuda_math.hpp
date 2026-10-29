@@ -83,7 +83,6 @@ struct finitePlan
     int half_width{};
     Vector gap{};
     const double* d_coeff = nullptr;
-    double* d_halo_work = nullptr;
     int status = -1;
 };
 
@@ -188,6 +187,8 @@ int creat_fftPlan(Context& context, Fft3dPlan*& fft_out,
 
 int creat_finitePlan(finitePlan& finite, int nx, int ny, int nz, int half_width,
                      double hx, double hy, double hz);
+
+int destory_finitePlan(finitePlan& finite);
 
 int apply_laplacian_finite(const Context& context, const finitePlan& finite,
                     const double* d_psi, double* d_lapl_psi) noexcept;

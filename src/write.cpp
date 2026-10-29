@@ -4,6 +4,7 @@
 #include "structure.hpp"
 #include "LBFGS.hpp"
 #include "Davidson.hpp"
+#include "smearing.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -108,7 +109,8 @@ void write_locpot(const std::filesystem::path& path, const StructGrid& grid,
 
 int write_results(const Context& context, const InputParameters& parameters,
                   const StructGrid& grid, const LBFGSState& lbfgs,
-                  const DavidsonPlan& davidson, std::string& error)
+                  const DavidsonPlan& davidson, const Occupation& occupation,
+                  std::string& error)
 {
     try {
         const auto& out = parameters.output;
@@ -136,11 +138,15 @@ int write_results(const Context& context, const InputParameters& parameters,
             for (double v : atom.position) require(std::isfinite(v), "non-finite atom position");
         }
 
-        std::vector<double> veff, psi, density, difference, eigenvalues;
+        std::vector<double> veff, psi, density, difference, eigenvalues, occupations;
         if (out.write_eigenvalues) {
             require(davidson.nstates > 0, "no Davidson eigenvalues to output");
+            require(occupation.status == kSuccess, "output occupation is not initialized");
+            require(occupation.nstates == davidson.nstates, "occupation and eigenvalue count mismatch");
             eigenvalues = download_field(context, davidson.d_eigenvalues,
                                         std::size_t(davidson.nstates), "eigenvalues");
+            occupations = download_field(context, occupation.d_occupation,
+                                         std::size_t(davidson.nstates), "occupations");
         }
         if (out.write_veff) {
             require(lbfgs.n == count, "LBFGS potential size does not match grid");
@@ -196,9 +202,9 @@ int write_results(const Context& context, const InputParameters& parameters,
             std::ofstream file(path);
             require(bool(file), "cannot open '" + path.string() + "'");
             file.imbue(std::locale::classic());
-            file << "# state eigenvalue_Ha\n" << std::scientific << std::setprecision(17);
+            file << "# state eigenvalue_Ha occupation\n" << std::scientific << std::setprecision(17);
             for (std::size_t s = 0; s < eigenvalues.size(); ++s)
-                file << s + 1 << ' ' << eigenvalues[s] << '\n';
+                file << s + 1 << ' ' << eigenvalues[s] << ' ' << occupations[s] << '\n';
             file.close();
             require(bool(file), "cannot finish writing '" + path.string() + "'");
         }

@@ -13,20 +13,20 @@ domain:
 mesh:
   type: uniform
   finite_half_width: 4
-  rgrids: 80 80 80
+  rgrids: 240 240 270
 
 # 4. 反解设置
 inversion:
   initial_potential: zero
   regularization_eta: 1e-8
-  relativ_rho_L2tol: 5e-6
-  extra_states: 4
+  relativ_rho_L2tol: 1e-5
+  extra_states: 1
 
   eigensolver:
     method: davidson
     residual_tolerance: 1.0e-9
     max_subspace_dim: 32
-    max_iterations: 100
+    max_iterations: 10000
     nextra_retain: 3
     direction_tolerance: 1.0e-8
 

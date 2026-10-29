@@ -71,10 +71,20 @@ void creat_WS_data(WS_data& Ws_data,Context context,InputParameters& parameters,
     cudaError_t err;
     size_t bytes = size_t(Ws_data.npoints)*sizeof(double);
     err = cudaMalloc(reinterpret_cast<void**>(&Ws_data.d_lapl_v),bytes);
+    if (err != cudaSuccess) {
+        std::fprintf(stderr, "[CUDA] d_lapl_v cudaMalloc: %d (%s)\n",
+                    static_cast<int>(err), cudaGetErrorString(err));
+        return;
+    }
     err = cudaMalloc(reinterpret_cast<void**>(&Ws_data.d_rho),bytes);
+    if (err != cudaSuccess) {
+        std::fprintf(stderr, "[CUDA] d_rho cudaMalloc: %d (%s)\n",
+                    static_cast<int>(err), cudaGetErrorString(err));
+        return;
+    }
     err = cudaMalloc(reinterpret_cast<void**>(&Ws_data.d_diff_rho),bytes);
     if (err != cudaSuccess) {
-        std::fprintf(stderr, "[CUDA] cudaMalloc: %d (%s)\n",
+        std::fprintf(stderr, "[CUDA] d_diff_rho cudaMalloc: %d (%s)\n",
                     static_cast<int>(err), cudaGetErrorString(err));
         return;
     }
@@ -207,8 +217,10 @@ int invks_scf(InputParameters& parameters, Context& context, WS_data& Ws_data, L
         ierr = calculate_rho(Ws_data.context,occ,d_eigenvalues,npoints,dV,d_psi,d_rho);
         if (ierr != kSuccess) return ierr;
         f=0;
-        download(d_eigenvalues,h_eigenvalues.data(),nstates);
-        download(occ.d_occupation,h_occ.data(),nstates);
+        ierr = download(d_eigenvalues,h_eigenvalues.data(),nstates);
+        if (ierr != kSuccess) return ierr;
+        ierr = download(occ.d_occupation,h_occ.data(),nstates);
+        if (ierr != kSuccess) return ierr;
         for(int i=0;i<nstates;i++) f -= h_occ[i]*h_eigenvalues[i];
         //
         double h_vrho = 0.0;
@@ -225,11 +237,23 @@ int invks_scf(InputParameters& parameters, Context& context, WS_data& Ws_data, L
         status = cublasDcopy(
             context.cublas, npoints,
             d_rho0, 1, d_g, 1);
+        if (status != CUBLAS_STATUS_SUCCESS) {
+            std::fprintf(stderr, "[cuBLAS] cublasDcopy: %d (%s)\n",
+                        static_cast<int>(status),
+                        cublasGetStatusName(status));
+            return kCublasError;
+        }
         // g=rho0-rho
         const double minus_one = -1.0;
         status = cublasDaxpy(
             context.cublas, npoints,
             &minus_one, d_rho, 1, d_g, 1);
+        if (status != CUBLAS_STATUS_SUCCESS) {
+            std::fprintf(stderr, "[cuBLAS] cublasDaxpy: %d (%s)\n",
+                        static_cast<int>(status),
+                        cublasGetStatusName(status));
+            return kCublasError;
+        }
         // g=[rho0-rho]*dv
         status = cublasDscal(
             context.cublas, npoints,
@@ -242,12 +266,13 @@ int invks_scf(InputParameters& parameters, Context& context, WS_data& Ws_data, L
         }
         // g=[rho0-rho]*dv-2*eta*Lv*dv
         ierr = finite_regularization_contributeTograd(context,finite,d_v,eta,dV,Ws_data.d_lapl_v);
+        if (ierr != kSuccess) return ierr;
         const double one = 1.0;
         status = cublasDaxpy(
             context.cublas, npoints,
             &one, Ws_data.d_lapl_v, 1, d_g, 1);
         if (status != CUBLAS_STATUS_SUCCESS) {
-            std::fprintf(stderr, "[cuBLAS] cublasDscal: %d (%s)\n",
+            std::fprintf(stderr, "[cuBLAS] cublasDaxpy: %d (%s)\n",
                         static_cast<int>(status),
                         cublasGetStatusName(status));
             return kCublasError;
@@ -312,18 +337,20 @@ int invks_scf(InputParameters& parameters, Context& context, WS_data& Ws_data, L
                 context.cublas, Ws_data.npoints,
                 Ws_data.d_rho, 1, Ws_data.d_diff_rho, 1);
             if (status != CUBLAS_STATUS_SUCCESS) {
-                std::fprintf(stderr, "[cuBLAS] cublasDscal: %d (%s)\n",
+                std::fprintf(stderr, "[cuBLAS] cublasDcopy: %d (%s)\n",
                             static_cast<int>(status),
                             cublasGetStatusName(status));
+                return finish(kCublasError);
             }
             // diff = rho-rho0
             status = cublasDaxpy(
                         context.cublas, Ws_data.npoints,
                         &minus_one, Ws_data.d_rho0, 1, Ws_data.d_diff_rho, 1);
             if (status != CUBLAS_STATUS_SUCCESS) {
-                std::fprintf(stderr, "[cuBLAS] cublasDscal: %d (%s)\n",
+                std::fprintf(stderr, "[cuBLAS] cublasDaxpy: %d (%s)\n",
                             static_cast<int>(status),
                             cublasGetStatusName(status));
+                return finish(kCublasError);
             }
             // relative_rho_L2norm = diff_norm
             status = cublasDnrm2(
@@ -333,9 +360,10 @@ int invks_scf(InputParameters& parameters, Context& context, WS_data& Ws_data, L
             1,                     // 元素间距
             &relative_rho_L2norm);
             if (status != CUBLAS_STATUS_SUCCESS) {
-                std::fprintf(stderr, "[cuBLAS] cublasDscal: %d (%s)\n",
+                std::fprintf(stderr, "[cuBLAS] cublasDnrm2: %d (%s)\n",
                             static_cast<int>(status),
                             cublasGetStatusName(status));
+                return finish(kCublasError);
             }
             // relative_rho_L2norm = diff_norm/rho_norm
             relative_rho_L2norm = relative_rho_L2norm/Ws_data.rho0_nrom;
@@ -351,7 +379,9 @@ int invks_scf(InputParameters& parameters, Context& context, WS_data& Ws_data, L
         if (result == kLBFGSLineSearchLimitReached) continue;  // 可重试警告
         if (result != kSuccess && result != kLBFGSConverged) break;
     }
-    if(!(relative_rho_L2norm < relative_rho_L2tol)){
+    if ((result == kSuccess || result == kLBFGSConverged ||
+         result == kLBFGSLineSearchLimitReached) &&
+        !(relative_rho_L2norm < relative_rho_L2tol)) {
         std::fprintf(stderr, "Density tolerance not reached.\n");
         result = -401;
     }
@@ -365,7 +395,9 @@ void write_SummaryLogs(const LBFGSState& lbfgs, int result,
     const char* title = result == kLBFGSConverged ? "IKS | CONVERGED" :
         outer_limit ? "IKS | OUTER LIMIT" :
         result == kLBFGSLineSearchLimitReached ? "IKS | LINE SEARCH LIMIT" : "IKS | FAILED";
-    const char* reason = outer_limit ? "Outer iteration limit reached" : lbfgs_status_message(result);
+    const char* result_message = result == -401 ?
+        "Density error tolerance not reached" : lbfgs_status_message(result);
+    const char* reason = outer_limit ? "Outer iteration limit reached" : result_message;
     auto row = [](const char* label, const char* value) {
         std::fprintf(stderr, "  %-16s %s\n", label, value);
     };
@@ -374,7 +406,7 @@ void write_SummaryLogs(const LBFGSState& lbfgs, int result,
     row("Reason", reason);
     std::snprintf(value, sizeof(value), "%d / %d", outer_iterations, max_iterations);
     row("Outer calls", value);
-    std::snprintf(value, sizeof(value), "%d (%s)", result, lbfgs_status_message(result));
+    std::snprintf(value, sizeof(value), "%d (%s)", result, result_message);
     row("Last result", value);
     // 初始化失败时优化器可能已重置，此时不把默认零值当成有效计算结果。
     if (lbfgs.evaluations == 0) {
@@ -417,13 +449,21 @@ int main(int argc, char** argv)
     std::string error;
     auto finish = [&](int result) {
         if (context.stream) cudaStreamSynchronize(context.stream);
+
         destory_LBFGSOptimizer(lbfgs);
         reset_DavidsonSolver(Ws_data.davidsonPlan);
         destroy_Occupation(occ);
-        cudaFree(Ws_data.d_rho);
+
         cudaFree(d_rho0);
-        cudaFree(const_cast<double*>(Ws_data.finite.d_coeff));
-        cudaFree(Ws_data.finite.d_halo_work);
+        const int finite_result = destory_finitePlan(Ws_data.finite);
+        if (finite_result != kSuccess) {
+            std::cerr << "destory_finitePlan failed (" << finite_result
+                      << "): " << status_message(finite_result) << '\n';
+            result = EXIT_FAILURE;
+        }
+
+        destory_Ws_data(Ws_data);
+
         if (context.cusolver) cusolverDnDestroy(context.cusolver);
         if (context.cublas) cublasDestroy(context.cublas);
         if (context.stream) cudaStreamDestroy(context.stream);
@@ -437,15 +477,13 @@ int main(int argc, char** argv)
         std::cerr << "Initialization failed (" << result << "): " << error << '\n';
         return finish(EXIT_FAILURE);
     }
-    result = invks_scf(parameters, context, Ws_data, lbfgs);
-    if (result != kLBFGSConverged) {
-        return finish(EXIT_FAILURE);
-    }
-
-    result = write_results(context, parameters, structgrid, lbfgs, Ws_data.davidsonPlan, error);
+    int scf_result = invks_scf(parameters, context, Ws_data, lbfgs);
+    result = write_results(context, parameters, structgrid, lbfgs, Ws_data.davidsonPlan, Ws_data.occ, error);
     if (result != kSuccess) {
         std::cerr << error << '\n';
         return finish(EXIT_FAILURE);
     }
+    if (scf_result != kLBFGSConverged) return finish(EXIT_FAILURE);
+
     return finish(EXIT_SUCCESS);
 }
