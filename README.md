@@ -4,7 +4,7 @@ cudaDFT 是面向孤立分子的 C++/CUDA 逆 Kohn–Sham 计算项目：从分�
 
 本文面向已经在任意位置完成编译安装的用户，介绍如何准备输入、启动计算和检查结果。运行示例使用已加入 `PATH` 的 `cudaDFT` 命令，不依赖源码目录或特定机器的安装路径。若程序未加入 `PATH`，将命令中的 `cudaDFT` 替换为你安装的可执行文件的完整路径。
 
-参数示例采用 LiH 算例的输入设置；除明确标为可选的字段外，输入项均需提供。部分字段目前仅被读取和校验，尚未接入数值流程，具体见参数表。
+本文按当前源码说明输入和运行行为；除明确标为可选的字段外，输入项均需提供。参数示例用于说明格式，不能保证任意网格和体系都在给定步数内收敛。
 
 ## 1. 快速开始
 
@@ -23,7 +23,7 @@ nvidia-smi
 
 ### 1.2 获取 LiH 输入
 
-可从 [LiH 算例](https://github.com/5ssx3/cudaDFT/tree/master/test/LiH_160x160x180_FD8) 获取以下三个文件，并保留它们的相对目录结构：
+可从 [LiH 算例](test/LiH_160x160x180_FD8/target) 获取配套的 `molecule.json` 和 `density_total.npy`。将第 2 节的当前格式保存为 `input.yaml`，组成以下目录：
 
 ```text
 LiH_160x160x180_FD8/
@@ -39,20 +39,21 @@ LiH_160x160x180_FD8/
 | `molecule.json` | PySCF 分子序列化文件，提供原子、核电荷、分子电荷、基组和 AO 顺序。 |
 | `density_total.npy` | 与分子文件配套的实数、AO 表示、自旋求和总密度矩阵，形状为 `(nao, nao)`。 |
 
-这三个文件足以准备一次计算，不需要复制算例中的旧 `results/` 和 `run.log`。该 LiH 体系有 4 个电子，当前使用两个空间轨道、每个轨道占据两个电子。
+这三个文件足以准备一次计算，不需要复制算例中的旧 `results/` 和 `run.log`。仓库中的 LiH 运行记录和结果属于历史版本，其 `input.yaml` 包含旧字段；使用当前程序时请采用第 2 节的格式，不直接照搬历史配置或以旧日志判定新程序的收敛条件。
+
+该 LiH 体系有 4 个电子。固定占据模式下，最低两个空间轨道各占据两个电子；额外求解的空态占据数为零。本文设置 `extra_states: 1`，共求解三个态。
 
 ### 1.3 建立独立运行目录
 
-在任意工作目录下放好上述 `LiH_160x160x180_FD8/` 文件夹，然后执行：
+在任意工作目录下放好上述 `LiH_160x160x180_FD8/target/` 文件夹，然后执行：
 
 ```bash
 mkdir -p LiH_run/target
-cp LiH_160x160x180_FD8/input.yaml LiH_run/input.yaml
 cp LiH_160x160x180_FD8/target/molecule.json LiH_run/target/
 cp LiH_160x160x180_FD8/target/density_total.npy LiH_run/target/
 ```
 
-`LiH_run` 是本次新计算的目录名，可以自行更换。重复计算时建议使用新目录，保留已有结果。
+将第 2 节的 YAML 保存为 `LiH_run/input.yaml` 后即可运行。`LiH_run` 是本次新计算的目录名，可以自行更换。重复计算时建议使用新目录，保留已有结果。
 
 ### 1.4 启动计算与查看日志
 
@@ -73,7 +74,7 @@ tail -f LiH_run/run.log
 
 ### 1.5 确认完成与输出位置
 
-完整成功运行应满足：退出状态为 `0`，日志包含最终 `IKS | CONVERGED` 汇总，且没有后续的最终求解或输出错误。启用示例中的全部输出开关时，运行目录为：
+完整成功运行应满足：退出状态为 `0`，日志包含最终 `IKS | CONVERGED` 汇总，`Density L2 / tol` 标为 `converged`，且没有后续输出错误。单次 `L-BFGS | CONVERGED` 只表示梯度达标，不代表完整反演成功。启用示例中的全部输出开关时，运行目录为：
 
 ```text
 LiH_run/
@@ -88,10 +89,11 @@ LiH_run/
     ├── DENSITY_DIFFERENCE
     ├── EIGENVALUES
     ├── ORBITAL_0001
-    └── ORBITAL_0002
+    ├── ORBITAL_0002
+    └── ORBITAL_0003
 ```
 
-若未收敛或程序报错，先查看 `run.log` 的终止原因。输出开关和文件单位见第 3.8 节；更详细的输出格式见第 5 节。
+若未收敛或程序报错，先查看 `run.log` 的终止原因。程序在反演返回后会尝试输出，即使反演失败也可能存在结果文件；文件存在不能证明收敛。输出开关和文件单位见第 3.8 节；更详细的输出格式见第 5 节。
 
 ### 1.6 输入路径规则
 
@@ -101,7 +103,7 @@ YAML 中的 `system.molecule_file`、`system.density_file` 和 `output.directory
 
 ## 2. LiH 算例的完整输入参数
 
-以下内容对应 LiH 算例的 `input.yaml`。首次复现可先保留这些设置；用于其他体系时，需要检查网格、计算盒和求解阈值的收敛性。
+以下是与当前读取器匹配的完整 LiH 输入，使用 `160 × 160 × 180` 网格。它不是历史运行记录的原始配置，也不是已验证必然收敛的参数组合；实际计算需要检查网格、计算盒、正则强度和求解阈值的收敛性。
 
 ```yaml
 system:
@@ -112,22 +114,21 @@ system:
 domain:
   padding: [12.0, 12.0, 12.0]
   orbital_boundary: dirichlet_zero
-  # hartree_boundary: multipole
-  # multipole_order: 4
 
 mesh:
   type: uniform
-  stencil_half_width: 4
+  finite_half_width: 4
   rgrids: 160 160 180
 
 inversion:
-  hartree_density: target
   initial_potential: zero
+  regularization_eta: 1.0e-8
+  relativ_rho_L2tol: 1.0e-5
+  extra_states: 1
 
   eigensolver:
     method: davidson
     residual_tolerance: 1.0e-9
-    extra_states: 4
     max_subspace_dim: 32
     max_iterations: 10000
     nextra_retain: 3
@@ -135,24 +136,16 @@ inversion:
 
   occupations:
     method: fixed
+    temperature: 0
 
   optimizer:
     method: lbfgs
     history: 10
     max_iterations: 1000
     max_linesearch_step: 50
+    gradient_tolerance: 5.0e-6
     c1: 1.0e-4
     c2: 0.9
-
-  objective:
-    density_metric: relative_l2
-    regularization:
-      type: gradient_l2
-      strength: 1.0e-6
-
-  convergence:
-    density_relative_l2: 1.0e-5
-    gradient_tolerance: 1.0e-6
 
 output:
   directory: ./results
@@ -163,7 +156,7 @@ output:
   write_wave: true
 ```
 
-输入采用严格校验：只允许一个 YAML 文档，拒绝未知字段、重复字段、缺失必填项和非法类型。不能随意添加泛函名称、温度、检查点或其他未支持的选项。
+输入采用严格校验：只允许一个 YAML 文档，拒绝未知字段、重复字段、缺失必填项和非法类型。`relativ_rho_L2tol` 的拼写与程序一致，不能改为 `relative_rho_L2tol`。旧的 `stencil_half_width`、`hartree_density`、`inversion.objective` 和 `inversion.convergence` 已不被接受。
 
 ## 3. 参数说明
 
@@ -183,10 +176,8 @@ output:
 | --- | --- | --- |
 | `padding` | `[12.0, 12.0, 12.0]` | 在原子坐标包围盒的 x、y、z 各方向两侧分别增加的长度，单位 bohr；必须为三个有限、非负数，最终每个方向盒长必须大于零。 |
 | `orbital_boundary` | `dirichlet_zero` | 当前仅支持此值，轨道在物理盒表面取零。 |
-| `hartree_boundary` | `multipole` | 可选，只接受 `multipole`；当前仅读取和校验，未接入主计算流程。 |
-| `multipole_order` | `4` | 可选，非负整数；须与 `hartree_boundary` 一起提供，当前未接入主计算流程。 |
 
-注释掉的字段不会生效；不提供 Hartree 边界字段时，不会自动启用多极边界。当前主流程直接优化完整有效势，未单独构造由这些参数控制的 Hartree 势。
+当前主流程直接优化完整有效势，未单独构造 Hartree 势；`hartree_boundary` 和 `multipole_order` 不是当前支持的输入字段。
 
 ### 3.3 `mesh`：均匀节点网格
 
@@ -194,7 +185,7 @@ output:
 | --- | --- | --- |
 | `type` | `uniform` | 当前仅支持全域均匀网格。 |
 | `rgrids` | `160 160 180` | x、y、z 三个方向的内部节点数，必须是一个以空格分隔三个正整数的标量，不能写成 YAML 列表 `[160, 160, 180]`。总点数不得超过求解器的 `int` 范围。 |
-| `stencil_half_width` | `4` | 有限差分半宽 `w`，正整数且不超过任一方向节点数。内部中心差分的标称阶数为 `2w`：`1` 对应二阶，`4` 对应八阶。实际精度需通过收敛测试确认。 |
+| `finite_half_width` | `4` | 有限差分半宽 `w`，正整数且不超过任一方向节点数。内部中心差分的标称阶数为 `2w`：`1` 对应二阶，`4` 对应八阶。实际精度需通过收敛测试确认。 |
 
 `rgrids` 不包含盒表面的零边界节点，也不包含 halo。对任一方向，设物理盒长为 `L`、内部节点数为 `n`，则：
 
@@ -210,9 +201,12 @@ dV = hx * hy * hz
 
 | 参数 | 示例 | 含义与实际行为 |
 | --- | --- | --- |
-| `hartree_density` | `target` | 只接受 `target`；当前仅读取和校验，没有单独的 Hartree 更新步骤。 |
 | `initial_potential` | `zero` | 只接受 `zero`；当前初始有效势全为零。 |
+| `regularization_eta` | `1.0e-8` | 有限、非负的势平滑正则系数，已加入目标函数和梯度；设为 `0` 关闭正则项。 |
+| `relativ_rho_L2tol` | `1.0e-5` | 有限且大于零的相对密度 L2 误差阈值；当前在优化器返回梯度收敛后检查。 |
+| `extra_states` | `1` | 额外求解的空态数，非负整数；实际求解态数为 `Ne/2 + extra_states`。 |
 | `occupations.method` | `fixed` | 只接受 `fixed`；最低 `Ne/2` 个空间轨道各占据两个电子，不使用温度或展宽参数。 |
+| `occupations.temperature` | `0` | 必填的有限、非负数；固定占据模式下不影响占据数。 |
 
 ### 3.5 `inversion.eigensolver`：Davidson 本征求解
 
@@ -220,20 +214,19 @@ dV = hx * hy * hz
 | --- | --- | --- |
 | `method` | `davidson` | 当前仅支持 Davidson。 |
 | `residual_tolerance` | `1.0e-9` | 本征残差二范数 `‖Hψ - εψ‖₂` 的绝对阈值，有限且大于零。 |
-| `extra_states` | `4` | 非负整数；当前只参与输入校验，尚未用于增加求解态数。实际只求解 `Ne/2` 个占据态。 |
 | `max_subspace_dim` | `32` | 最大子空间维数，正整数且不超过总网格点数；还须满足下方约束。增大时显存需求增加。 |
-| `max_iterations` | `10000` | 每次 Davidson 调用允许的最大迭代次数，正整数；不同于反演外层迭代上限。 |
-| `nextra_retain` | `3` | 重启时在占据态之外额外保留的 Ritz 向量数，非负整数；不改变实际求解态数。 |
+| `max_iterations` | `10000` | 每次 Davidson 调用允许的最大迭代次数，须大于 `1`；不同于反演外层迭代上限。 |
+| `nextra_retain` | `3` | 重启时在全部目标态之外额外保留的 Ritz 向量数，非负整数；不改变实际求解态数。 |
 | `direction_tolerance` | `1.0e-8` | 正交化后接受新搜索方向的相对范数阈值，必须满足 `0 < value < 1`。 |
 
 令 `Ngrid = nx * ny * nz`，当前输入校验与求解器初始化共同要求：
 
 ```text
-extra_states + nextra_retain + 1 < max_subspace_dim <= Ngrid
-Ne / 2 + nextra_retain < max_subspace_dim
+nstates = Ne / 2 + extra_states
+nstates + nextra_retain < max_subspace_dim <= Ngrid
 ```
 
-第二条需要读取分子电子数后才能检查。对于电子数较多的体系，需要相应增加 `max_subspace_dim`。
+实际态数需要读取分子电子数后才能确定。对于电子数较多的体系，需要相应增加 `max_subspace_dim`。单次 Davidson 达到迭代上限时，反演回调最多继续调用 10 次；仍未收敛则返回错误。
 
 ### 3.6 `inversion.optimizer`：L-BFGS 优化
 
@@ -242,36 +235,41 @@ Ne / 2 + nextra_retain < max_subspace_dim
 | `method` | `lbfgs` | 当前仅支持 L-BFGS。 |
 | `history` | `10` | 保存的历史向量组数，正整数；增大时显存需求增加。 |
 | `max_iterations` | `1000` | 反演外层调用优化器的最大次数，正整数；一次调用至多接受一步。 |
-| `max_linesearch_step` | `50` | 正整数；当前 YAML 值仅被读取和校验，优化器初始化仍固定使用 `50`。 |
-| `c1` | `1.0e-4` | Wolfe 充分下降条件参数；当前 YAML 值未传入优化器，实际使用内部初值 `1.0e-4`。 |
-| `c2` | `0.9` | Wolfe 曲率条件参数；当前 YAML 值未传入优化器，实际使用内部初值 `0.9`。 |
+| `max_linesearch_step` | `50` | 每次调用的线搜索试探上限，正整数；实际传入优化器。 |
+| `gradient_tolerance` | `5.0e-6` | 优化梯度二范数阈值，有限且非负；实际梯度还含有正则项。 |
+| `c1` | `1.0e-4` | Wolfe 充分下降条件参数，实际传入优化器。 |
+| `c2` | `0.9` | 强 Wolfe 曲率条件参数，实际传入优化器。 |
 
 输入中的 Wolfe 参数仍必须满足 `0 < c1 < c2 < 1`。达到单次线搜索上限时，会保留已接受的状态并输出警告；外层可继续重试，该调用仍计入 `max_iterations`。
 
-### 3.7 `inversion.objective` 与 `inversion.convergence`
+### 3.7 目标函数、正则项与收敛判据
 
-| 参数路径（相对于 `inversion`） | 示例 | 含义与实际行为 |
-| --- | --- | --- |
-| `objective.density_metric` | `relative_l2` | 只接受此值；当前仅读取和校验，优化回调没有将密度相对 L2 误差作为目标函数。 |
-| `objective.regularization.type` | `gradient_l2` | 只接受此值；当前正则化项尚未加入目标函数或梯度。 |
-| `objective.regularization.strength` | `1.0e-6` | 有限、非负数；当前不影响计算。 |
-| `convergence.density_relative_l2` | `1.0e-5` | 有限且大于零；当前尚未用于停止判据。 |
-| `convergence.gradient_tolerance` | `1.0e-6` | 优化梯度二范数阈值，有限且非负；**这是当前实际使用的反演收敛阈值**。 |
-
-当前回调优化的函数和离散梯度为：
+目标密度 `rho_target` 由外部输入构建，在反演期间固定。当前回调优化的函数和离散梯度为：
 
 ```text
-f(v) = -2 * sum(occupied eigenvalues) + dV * sum(v * rho_target)
-g[p] = (rho_target[p] - rho_KS[p]) * dV
+f(v) = -sum(occupation[s] * eigenvalue[s])
+       + dV * sum(v * rho_target) + R(v)
+R(v) = -eta * dV * v^T * L_reg * v
+g = dV * (rho_target - rho_KS) - 2 * eta * dV * L_reg * v
 ```
 
-日志中的 `f` 是反演目标函数值，不是分子总能量。`||g||₂` 达到阈值不代表程序已经独立检查了 YAML 中的密度相对误差阈值；需要时应另行计算：
+`eta` 对应 `regularization_eta`。`L_reg` 使用有限差分二阶导数系数，只累加网格内有效邻居的势差，不对网格外势值补零。因此常数势偏移不改变正则项；比较不同势或绝对能级时，需要约定相同零点。动能算子的轨道零边界处理与正则算子分别实现。
+
+日志中的 `f` 是反演目标函数值，不是分子总能量。相对密度误差定义为：
 
 ```text
 density_relative_l2 = sqrt(sum((rho_KS - rho_target)^2) / sum(rho_target^2))
 ```
 
-梯度含有 `dV`，调整网格后应重新评估阈值与密度误差的对应关系。
+当前反演停止流程为：
+
+1. 每次 L-BFGS 调用至多接受一步；接受步满足充分下降与强 Wolfe 曲率条件，梯度模不要求单调下降。
+2. 只有返回梯度收敛状态时，才检查并打印 `relative density diff L2 / tol`。密度误差未达标时继续优化，不再设置额外的密度重试次数上限。
+3. 梯度达标且密度误差小于 `relativ_rho_L2tol` 时，返回完整反演收敛。若外层次数耗尽仍未通过密度检查，返回 `-401`，最终汇总为 `IKS | FAILED`；尚未执行密度检查时，汇总显示 `n/a`。
+
+正则梯度可能与密度梯度部分抵消，所以总梯度小不能代替实际密度误差。`gradient_tolerance` 过小也可能推迟密度检查；不能假定减小 `regularization_eta` 或增加迭代次数一定能达标。二者应结合实际密度误差与势的平滑程度做收敛测试。
+
+梯度含有 `dV`。仅在 `eta=0` 时，`||g||₂ = dV * ||rho_KS-rho_target||₂`；调整网格后应重新评估梯度阈值。反演未通过密度检查时，继续迭代所用的内部标记可能覆盖最终汇总的梯度值；真实接受点的梯度以相应 L-BFGS 日志为准。
 
 ### 3.8 `output`：输出目录与开关
 
@@ -282,11 +280,11 @@ density_relative_l2 = sqrt(sum((rho_KS - rho_target)^2) / sum(rho_target^2))
 | `write_density` | `true` | 写入 `DENSITY`，保存重建的 KS 电子密度，单位 bohr⁻³。 |
 | `write_density_difference` | `true` | 写入 `DENSITY_DIFFERENCE`，数值为 `rho_KS - rho_target`，单位 bohr⁻³。 |
 | `write_wave` | `true` | 写入 `ORBITAL_0001` 等带符号实空间轨道，单位 bohr⁻³ᐟ²，积分范数为 1。 |
-| `write_eigenvalues` | `true` | 可选，省略时为 `false`；写入 `EIGENVALUES`，列为从 1 开始的态编号及 Hartree 单位的本征值。 |
+| `write_eigenvalues` | `true` | 可选，省略时为 `false`；写入 `EIGENVALUES`，三列依次为态编号、Hartree 单位的本征值、实际占据数。 |
 
 开关使用 YAML 布尔值 `true` 或 `false`。除 `write_eigenvalues` 外，上表开关均为必填项。当前字段名为 `write_wave`，不接受 `write_orbitals`、`write_vxc`、`write_checkpoint` 或 `write_resolved_input`。
 
-只有反演达到梯度收敛条件后，程序才执行最终结果输出；达到外层上限或发生计算错误时返回失败。输出相同文件名会覆盖已有内容；关闭某个开关不会删除该目录中已有的对应文件。
+反演返回后会尝试输出，再根据反演状态返回进程退出码；未通过密度判据时也可能写出文件。程序被中途终止时，不能依赖该输出流程保存当前状态。当前没有检查点或从保存势恢复计算的输入接口，只支持零势初猜。输出相同文件名会覆盖已有内容；关闭某个开关不会删除该目录中已有的对应文件。
 
 ## 4. 分子与目标密度文件
 
@@ -345,9 +343,11 @@ rho_target = rho * Ne / (dV * sum(rho))
 
 为保存内部节点而不补边界或插值，输出文件原点取 `lower + gap`，文件晶胞各方向长度取 `rgrids * gap`，原子坐标相对于该原点平移；标题记录原点和原始物理盒边界。因此，输出文件晶胞长度与求解时的完整物理盒长不同。
 
-密度文件保存直接的 bohr⁻³ 数值，不按 VASP CHGCAR 的体积缩放约定写入。`LOCPOT` 保存优化变量 `veff` 的原始零点，仅将 Hartree 转换为 eV，没有减费米能，也没有单独分离交换关联势。当前只求解占据态，输出能级不能据此确定 HOMO–LUMO 能隙。
+密度文件保存直接的 bohr⁻³ 数值，不按 VASP CHGCAR 的体积缩放约定写入。`LOCPOT` 保存优化变量 `veff` 的原始零点，仅将 Hartree 转换为 eV，没有减费米能，也没有单独分离交换关联势。
 
-运行日志包含每次外层迭代、Davidson/L-BFGS 状态和最终 IKS 汇总。`Inversion time` 覆盖初始目标函数评价及外层迭代，不包含输入读取、网格/CUDA 初始化和最终重算、输出时间。
+`write_wave: true` 时，输出全部 `Ne/2 + extra_states` 个带符号轨道，而非仅占据态；密度只使用固定占据的最低 `Ne/2` 个态。`EIGENVALUES` 的表头为 `# state eigenvalue_Ha occupation`。至少求解一个空态后才能从输出读取最低空态与最高占据态之差；势零点和空态的盒尺寸依赖仍需注意。
+
+运行日志包含每次外层迭代、Davidson/L-BFGS 状态和最终 IKS 汇总。`Density L2 / tol` 给出已检查的密度误差、阈值和状态，未检查时为 `n/a`。`Inversion time` 覆盖初始目标函数评价及外层迭代，不包含输入读取、网格/CUDA 初始化和结果输出时间。
 
 ## 6. 从 LiH 扩展到自己的体系
 
