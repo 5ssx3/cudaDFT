@@ -12,6 +12,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <iostream>
+#include <limits>
 #include <vector>
 
 struct WS_data
@@ -153,17 +154,21 @@ constexpr char iks_separator[] =
     "================================================================================================\n";
 }
 void write_SummaryLogs(const LBFGSState& lbfgs, int result,
-                       int outer_iterations, int max_iterations, double elapsed_seconds);
+                       int outer_iterations, int max_iterations, double elapsed_seconds,
+                       double relative_rho_L2norm, double relative_rho_L2tol);
 // lbfgs 由调用方持有，输出完成后再销毁，保留最终接受的势。
 int invks_scf(InputParameters& parameters, Context& context, WS_data& Ws_data, LBFGSState& lbfgs)
 {
     const int max_interation = parameters.inversion.optimizer.max_iterations;
     int outer_iterations = 0;
+    double relative_rho_L2norm = std::numeric_limits<double>::quiet_NaN();
+    double relative_rho_L2tol = parameters.inversion.relative_rho_L2tol;
     const auto inversion_start = std::chrono::steady_clock::now();
     auto finish = [&](int result) {
         const double elapsed_seconds = std::chrono::duration<double>(
             std::chrono::steady_clock::now() - inversion_start).count();
-        write_SummaryLogs(lbfgs, result, outer_iterations, max_interation, elapsed_seconds);
+        write_SummaryLogs(lbfgs, result, outer_iterations, max_interation, elapsed_seconds,
+                          relative_rho_L2norm, relative_rho_L2tol);
         return result;
     };
     std::fprintf(stderr, "\n%sIKS | INITIALIZATION\n", iks_separator);
@@ -305,12 +310,8 @@ int invks_scf(InputParameters& parameters, Context& context, WS_data& Ws_data, L
     if (result != 0)
         return finish(result);
     //
-    double relative_rho_L2tol = parameters.inversion.relative_rho_L2tol;
     cublasStatus_t status;
     const double minus_one = -1.0;
-    int retry = 0;
-    int max_retry = 100;
-    double relative_rho_L2norm = 1000.0;
     for(int i=0;i<max_interation;i++){
         outer_iterations = i + 1;
         const auto step_start = std::chrono::steady_clock::now();
@@ -319,6 +320,7 @@ int invks_scf(InputParameters& parameters, Context& context, WS_data& Ws_data, L
         std::fprintf(stderr, "\n%sIKS | OUTER ITERATION %d / %d\n\n",
                      iks_separator, outer_iterations, max_interation);
         
+        relative_rho_L2norm = std::numeric_limits<double>::quiet_NaN();
         result = LBFGSOptimizer(context, lbfgs, iks_Ws, &Ws_data);\
         const double step_seconds = std::chrono::duration<double>(
             std::chrono::steady_clock::now() - step_start).count();
@@ -353,12 +355,13 @@ int invks_scf(InputParameters& parameters, Context& context, WS_data& Ws_data, L
                 return finish(kCublasError);
             }
             // relative_rho_L2norm = diff_norm
+            double diff_norm = 0.0;
             status = cublasDnrm2(
             context.cublas,
             Ws_data.npoints,       // 元素数量
             Ws_data.d_diff_rho,    // 设备端向量
             1,                     // 元素间距
-            &relative_rho_L2norm);
+            &diff_norm);
             if (status != CUBLAS_STATUS_SUCCESS) {
                 std::fprintf(stderr, "[cuBLAS] cublasDnrm2: %d (%s)\n",
                             static_cast<int>(status),
@@ -366,14 +369,13 @@ int invks_scf(InputParameters& parameters, Context& context, WS_data& Ws_data, L
                 return finish(kCublasError);
             }
             // relative_rho_L2norm = diff_norm/rho_norm
-            relative_rho_L2norm = relative_rho_L2norm/Ws_data.rho0_nrom;
+            relative_rho_L2norm = diff_norm/Ws_data.rho0_nrom;
+            std::fprintf(stderr, "  relative density diff L2 / tol %.6e / %.6e (%s)\n",
+                         relative_rho_L2norm, relative_rho_L2tol,
+                         relative_rho_L2norm < relative_rho_L2tol ?
+                         "converged" : "not converged");
             if(relative_rho_L2norm < relative_rho_L2tol) break;
-            if (retry >= max_retry) {
-                std::fprintf(stderr, "Density tolerance not reached.\n");
-                result = -401;
-                break;
-            }
-            retry++;
+
             lbfgs.g_norm=1+parameters.inversion.optimizer.gradient_tolerance;
         }
         if (result == kLBFGSLineSearchLimitReached) continue;  // 可重试警告
@@ -388,7 +390,8 @@ int invks_scf(InputParameters& parameters, Context& context, WS_data& Ws_data, L
     return finish(result);
 }
 void write_SummaryLogs(const LBFGSState& lbfgs, int result,
-                       int outer_iterations, int max_iterations, double elapsed_seconds)
+                       int outer_iterations, int max_iterations, double elapsed_seconds,
+                       double relative_rho_L2norm, double relative_rho_L2tol)
 {
     const bool outer_limit = outer_iterations >= max_iterations &&
         (result == kSuccess || result == kLBFGSLineSearchLimitReached);
@@ -408,6 +411,14 @@ void write_SummaryLogs(const LBFGSState& lbfgs, int result,
     row("Outer calls", value);
     std::snprintf(value, sizeof(value), "%d (%s)", result, result_message);
     row("Last result", value);
+    if (std::isfinite(relative_rho_L2norm)) {
+        std::snprintf(value, sizeof(value), "%.6e / %.6e (%s)",
+                      relative_rho_L2norm, relative_rho_L2tol,
+                      relative_rho_L2norm < relative_rho_L2tol ? "converged" : "not converged");
+    } else {
+        std::snprintf(value, sizeof(value), "n/a / %.6e (not available)", relative_rho_L2tol);
+    }
+    row("Density L2 / tol", value);
     // 初始化失败时优化器可能已重置，此时不把默认零值当成有效计算结果。
     if (lbfgs.evaluations == 0) {
         row("Accepted/evals", "n/a");
