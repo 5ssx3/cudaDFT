@@ -481,6 +481,11 @@ int main(int argc, char** argv)
         return result;
     };
 
+    if (std::freopen("run.log", "w", stderr) == nullptr) {
+        std::perror("Cannot open run.log");
+        return EXIT_FAILURE;
+    }
+    std::setvbuf(stderr, nullptr, _IONBF, 0);
 
     int result = begin(parameters, context, occ, Ws_data.finite, Ws_data.davidsonPlan,
                        structgrid, Ws_data, d_rho0, filename, error);

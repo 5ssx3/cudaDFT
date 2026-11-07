@@ -247,7 +247,7 @@ int DoubleLoopHg(Context& context,LBFGSState& lbfgs){
         return kCudaMemcpyError;
     if (!CHECK_CUBLAS(cublasSetPointerMode(context.cublas, CUBLAS_POINTER_MODE_DEVICE)))
         return kLBFGSCublasError;
-    // at=(st)q; q=q-rhot*at*yt
+    // at=(s^t)q; q=q-rhot*a^t*y^t
     for(int t=lbfgs.history_count-1;t>=0;t--){
         int i = t2i(lbfgs,t);
         const size_t offset = size_t(n) * i;
