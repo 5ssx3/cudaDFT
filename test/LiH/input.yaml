@@ -1,0 +1,53 @@
+# 1. 系统体系
+system:
+  molecule_file: target/molecule.json
+  density_file: target/density_total.npy
+  spin: unpolarized
+
+# 2. 计算盒设置
+domain:
+  padding: [12.0, 12.0, 12.0]
+  orbital_boundary: dirichlet_zero
+
+# 3. 网格设置
+mesh:
+  type: uniform
+  finite_half_width: 4
+  rgrids: 240 240 270
+
+# 4. 反解设置
+inversion:
+  initial_potential: zero
+  regularization_eta: 1e-8
+  relativ_rho_L2tol: 5e-5
+  extra_states: 1
+
+  eigensolver:
+    method: davidson
+    residual_tolerance: 1.0e-9
+    max_subspace_dim: 32
+    max_iterations: 10000
+    nextra_retain: 3
+    direction_tolerance: 1.0e-8
+
+  occupations:
+    method: fixed
+    temperature : 0
+
+  optimizer:
+    method: lbfgs
+    history: 10
+    max_iterations: 1000
+    max_linesearch_step: 50
+    gradient_tolerance: 5.0e-6
+    c1: 1.0e-4
+    c2: 0.9
+
+# 5. 输出设置
+output:
+  directory: ./results
+  write_veff: true
+  write_density: true
+  write_density_difference: true
+  write_eigenvalues: true
+  write_wave: true

@@ -13,13 +13,14 @@ domain:
 mesh:
   type: uniform
   finite_half_width: 4
-  rgrids: 160 160 180
+  rgrids: 240 240 270
 
 # 4. 反解设置
 inversion:
   initial_potential: zero
-  regularization_eta: 1.0e-6
-  extra_states: 4
+  regularization_eta: 1e-9
+  relativ_rho_L2tol: 5e-5
+  extra_states: 1
 
   eigensolver:
     method: davidson
@@ -31,18 +32,16 @@ inversion:
 
   occupations:
     method: fixed
-    temperature: 0
+    temperature : 0
 
   optimizer:
     method: lbfgs
     history: 10
     max_iterations: 1000
     max_linesearch_step: 50
+    gradient_tolerance: 5.0e-6
     c1: 1.0e-4
     c2: 0.9
-
-  convergence:
-    gradient_tolerance: 3.0e-6
 
 # 5. 输出设置
 output:
