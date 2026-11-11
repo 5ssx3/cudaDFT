@@ -166,8 +166,11 @@ int read_parameters(const std::string& filename,
 
         const auto occupations = inversion["occupations"];
         check_mapping(occupations, "inversion.occupations", {"method", "temperature"});
-        parsed.inversion.occupations.method = choice(occupations, "method", "inversion.occupations", "fixed");
-        parsed.inversion.occupations.temperature = number(occupations, "temperature", "inversion.occupations", false);
+        auto& occ = parsed.inversion.occupations;
+        occ.method = value<std::string>(occupations, "method", "inversion.occupations");
+        require(occ.method == "fixed" || occ.method == "fd", "inversion.occupations.method",
+                "supported values are 'fixed' and 'fd'");
+        occ.temperature = number(occupations, "temperature", "inversion.occupations", occ.method == "fd");
 
         const auto optimizer = inversion["optimizer"];
         const std::string opt_path = "inversion.optimizer";

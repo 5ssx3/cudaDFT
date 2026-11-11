@@ -46,7 +46,8 @@ bool valid_parameters(int nstates, int ne, double temperature,
                       const std::string& occ_mode) noexcept
 {
     return nstates > 0 && ne >= 0 && static_cast<long long>(ne) <= 2LL * nstates &&
-        (occ_mode == "fixed" || (std::isfinite(temperature) && temperature > 0.0));
+        (occ_mode == "fixed" ||
+         (occ_mode == "fd" && std::isfinite(temperature) && temperature > 0.0));
 }
 
 int fixed(Occupation& occupation)
@@ -171,11 +172,46 @@ int calculate_occupation(Occupation& occupation,double* d_eigenvalues) noexcept
     return report_occupation_status(status, "calculate_occupation");
 }
 int calculate_rho(Context& context,Occupation& occupation,double* d_eigenvalues,
-                    int npoints,double dV,double* d_psi,double* d_rho) noexcept
+                    int npoints,double dV,double* d_psi,double* d_rho, double& TS) noexcept
 {
-    int status;
-    status = calculate_occupation(occupation,d_eigenvalues);
+    TS = 0.0;
+    if (npoints <= 0 || !std::isfinite(dV) || dV <= 0.0 ||
+        d_psi == nullptr || d_rho == nullptr)
+        return report_occupation_status(kInvalidArgument, "calculate_rho");
+    if (context.stream != occupation.context.stream)
+        return report_occupation_status(kInvalidState, "calculate_rho");
+    int status = calculate_occupation(occupation,d_eigenvalues);
     if (status != kSuccess) return status;
     status = real_calrho(context,occupation.d_occupation,d_psi,npoints,occupation.nstates,dV,d_rho);
-    return status;
+    if (status != kSuccess) return report_occupation_status(status, "calculate_rho");
+    if (occupation.occ_mode == "fixed") {
+        if (!CHECK_CUDA(cudaStreamSynchronize(context.stream)))
+            return report_occupation_status(kCudaSyncError, "calculate_rho");
+        return kSuccess;
+    }
+    try {
+        std::vector<double> h_occ(occupation.nstates);
+        if (!CHECK_CUDA(cudaMemcpyAsync(h_occ.data(), occupation.d_occupation,
+                size_t(occupation.nstates) * sizeof(double), cudaMemcpyDeviceToHost, context.stream)))
+            return report_occupation_status(kCudaMemcpyError, "calculate_rho");
+        if (!CHECK_CUDA(cudaStreamSynchronize(context.stream)))
+            return report_occupation_status(kCudaSyncError, "calculate_rho");
+        const double sigma = 3.166811563e-6 * occupation.temperature;
+        double entropy_term = 0.0;
+        for (double n : h_occ) {
+            if (!std::isfinite(n))
+                return report_occupation_status(kOccupationNonFinite, "calculate_rho");
+            if (n < 0.0 || n > 2.0)
+                return report_occupation_status(kInvalidArgument, "calculate_rho");
+            const double p = n / 2.0;
+            if (p > 0.0) entropy_term -= 2.0 * sigma * p * std::log(p);
+            if (p < 1.0) entropy_term -= 2.0 * sigma * (1.0 - p) * std::log1p(-p);
+        }
+        if (!std::isfinite(entropy_term))
+            return report_occupation_status(kOccupationNonFinite, "calculate_rho");
+        TS = entropy_term;
+    } catch (const std::bad_alloc&) {
+        return report_occupation_status(kAllocationError, "calculate_rho");
+    }
+    return kSuccess;
 }

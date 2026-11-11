@@ -219,9 +219,10 @@ int invks_scf(InputParameters& parameters, Context& context, WS_data& Ws_data, L
         }
         if (ierr != kSuccess) return ierr;
         double* d_psi = davidsonPlan.d_psi;
-        ierr = calculate_rho(Ws_data.context,occ,d_eigenvalues,npoints,dV,d_psi,d_rho);
+        double TS = 0.0;
+        ierr = calculate_rho(Ws_data.context,occ,d_eigenvalues,npoints,dV,d_psi,d_rho,TS);
         if (ierr != kSuccess) return ierr;
-        f=0;
+        f=TS;
         ierr = download(d_eigenvalues,h_eigenvalues.data(),nstates);
         if (ierr != kSuccess) return ierr;
         ierr = download(occ.d_occupation,h_occ.data(),nstates);
